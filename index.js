@@ -1,128 +1,120 @@
-const puppeteer = require('puppeteer-extra');
-const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+const fs = require("fs");
+const path = require("path");
+const puppeteer = require("puppeteer-extra");
+const StealthPlugin = require("puppeteer-extra-plugin-stealth");
 
-// Thêm stealth plugin để tránh bị phát hiện bot
 puppeteer.use(StealthPlugin());
 
-// --- CẤU HÌNH ---
 const SOURCE_GROUP = "Nhóm 1";
 const TARGET_GROUP = "Nhóm 2";
-const CHECK_INTERVAL = 3000; // Kiểm tra mỗi 3 giây
+const CHECK_INTERVAL = 3000;
 
 async function runBot() {
-    // Khởi tạo trình duyệt với stealth và tối ưu hiệu suất
-    const browser = await puppeteer.launch({
-        headless: false, // Hiện trình duyệt để bạn quét mã QR
-        userDataDir: './zalo_session',
-        args: [
-            '--start-maximized',
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-accelerated-2d-canvas',
-            '--disable-gpu',
-            '--disable-blink-features=AutomationControlled'
-        ],
-        defaultViewport: null
-    });
+  const sessionPath = "./zalo_session";
+  const hasSession = fs.existsSync(path.join(sessionPath, "Default"));
 
-    const page = await browser.newPage();
-    
-    // Chặn các tài nguyên không cần thiết để tăng tốc
-    await page.setRequestInterception(true);
-    page.on('request', (req) => {
-        const resourceType = req.resourceType();
-        if (['image', 'stylesheet', 'font', 'media'].includes(resourceType)) {
-            req.abort();
-        } else {
-            req.continue();
-        }
-    });
-    
-    // Tối ưu user agent
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36');
-    await page.goto('https://chat.zalo.me/', { waitUntil: 'networkidle2' });
+  const browser = await puppeteer.launch({
+    headless: hasSession,
+    userDataDir: sessionPath,
+    args: [
+      "--start-maximized",
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-accelerated-2d-canvas",
+      "--disable-gpu",
+      "--disable-blink-features=AutomationControlled",
+    ],
+    defaultViewport: null,
+  });
 
-    console.log("Vui lòng đăng nhập Zalo Web...");
+  const page = await browser.newPage();
+  await page.setViewport({ width: 1366, height: 768 });
+  await page.goto("https://chat.zalo.me/", { waitUntil: "networkidle2" });
 
-    // Chờ cho đến khi thanh tìm kiếm xuất hiện (đã đăng nhập thành công)
-    await page.waitForSelector('#contact-search-input', { timeout: 0 });
-    console.log("Đăng nhập thành công!");
+  if (!hasSession) {
+    console.log("⏳ Vui lòng quét QR code để đăng nhập...");
+  }
 
-    // Vào Nhóm 1 một lần duy nhất
-    console.log(`🔍 Đang tìm và truy cập ${SOURCE_GROUP}...`);
-    await page.type('#contact-search-input', SOURCE_GROUP, { delay: 50 }); // Thêm delay tự nhiên
-    await page.waitForTimeout(1500);
-    await page.keyboard.press('Enter');
-    await page.waitForTimeout(2500);
-    
-    // Xóa thanh tìm kiếm
-    const searchInput = await page.$('#contact-search-input');
-    if (searchInput) {
-        await searchInput.click({ clickCount: 3 });
-        await page.keyboard.press('Backspace');
-        await page.waitForTimeout(500);
-    }
-    
-    console.log(`✅ Đã vào ${SOURCE_GROUP}. Bắt đầu quét tin nhắn mỗi ${CHECK_INTERVAL/1000}s...\n`);
+  await page.waitForSelector("#contact-search-input", { timeout: 0 });
+  console.log("✅ Đã đăng nhập");
 
-    let lastMessage = "";
+  await page.type("#contact-search-input", SOURCE_GROUP);
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  await page.keyboard.press("Enter");
+  await new Promise((resolve) => setTimeout(resolve, 2500));
 
-    setInterval(async () => {
-        try {
-            // 1. Quét tin nhắn trong Nhóm 1 (đã ở trong nhóm rồi)
-            const currentMsg = await page.evaluate(() => {
-                const msgs = document.querySelectorAll('.content.text');
-                return msgs.length > 0 ? msgs[msgs.length - 1].innerText : "";
-            });
+  const searchInput = await page.$("#contact-search-input");
+  await searchInput.click({ clickCount: 3 });
+  await page.keyboard.press("Backspace");
+  await new Promise((resolve) => setTimeout(resolve, 500));
 
-            // 2. Nếu có tin mới, forward sang Nhóm 2
-            if (currentMsg && currentMsg !== lastMessage) {
-                console.log(`📨 Tin mới: "${currentMsg}"`);
-                lastMessage = currentMsg;
+  console.log(`✅ Đã vào ${SOURCE_GROUP}, bắt đầu quét...\n`);
 
-                // 3. Tìm và vào Nhóm 2
-                if (search) {
-                    await search.click({ clickCount: 3 });
-                    await page.keyboard.press('Backspace');
-                    await page.type('#contact-search-input', TARGET_GROUP, { delay: 50 });
-                    await page.waitForTimeout(1500);
-                    await page.keyboard.press('Enter');
-                    await page.waitForTimeout(2000);
+  let lastMessage = "";
+  let scanCount = 0;
 
-                    // 4. Gửi tin nhắn
-                    await page.type('#rich-input', `${currentMsg}`, { delay: 30 });
-                    await page.keyboard.press('Enter');
-                    await page.waitForTimeout(1000);
-                    console.log(`✅ Đã forward sang ${TARGET_GROUP}`);
+  setInterval(async () => {
+    try {
+      scanCount++;
+      console.log(
+        `[${new Date().toLocaleTimeString()}] 🔍 Quét lần #${scanCount}...`,
+      );
 
-                    // 5. Quay lại Nhóm 1
-                    console.log(`🔙 Quay lại ${SOURCE_GROUP}...`);
-                    const search2 = await page.$('#contact-search-input');
-                    if (search2) {
-                        await search2.click({ clickCount: 3 });
-                        await page.keyboard.press('Backspace');
-                        await page.type('#contact-search-input', SOURCE_GROUP, { delay: 50 });
-                        await page.waitForTimeout(1500);
-                        await page.keyboard.press('Enter');
-                        await page.waitForTimeout(2000);
-                        
-                        // Xóa thanh tìm kiếm
-                        const search3 = await page.$('#contact-search-input');
-                        if (search3) {
-                            await search3.click({ clickCount: 3 });
-                            await page.keyboard.press('Backspace');
-                        }
-                        console.log(`✅ Đã quay lại ${SOURCE_GROUP}\n`);
-                    }
-                }
-                await page.keyboard.press('Backspace');
-                console.log(`✅ Đã quay lại ${SOURCE_GROUP}\n`);
+      const currentMsg = await page.evaluate(() => {
+        const frames = document.querySelectorAll(".message-frame");
+        for (let i = frames.length - 1; i >= 0; i--) {
+          if (!frames[i].classList.contains("me")) {
+            const textSpan = frames[i].querySelector("span.text");
+            if (textSpan) {
+              const text = (
+                textSpan.innerText ||
+                textSpan.textContent ||
+                ""
+              ).trim();
+              if (text) return text;
             }
-        } catch (error) {
-            console.error("❌ Lỗi:", error.message);
+          }
         }
-    }, CHECK_INTERVAL);
+        return "";
+      });
+
+      if (currentMsg && currentMsg !== lastMessage) {
+        console.log(`📨 "${currentMsg}"`);
+        lastMessage = currentMsg;
+
+        const search = await page.$("#contact-search-input");
+        await search.click({ clickCount: 3 });
+        await page.keyboard.press("Backspace");
+        await page.type("#contact-search-input", TARGET_GROUP);
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        await page.keyboard.press("Enter");
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+
+        await page.type("#richInput", `${currentMsg}`);
+        await page.keyboard.press("Enter");
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+
+        const search2 = await page.$("#contact-search-input");
+        await search2.click({ clickCount: 3 });
+        await page.keyboard.press("Backspace");
+        await page.type("#contact-search-input", SOURCE_GROUP);
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        await page.keyboard.press("Enter");
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+
+        const search3 = await page.$("#contact-search-input");
+        await search3.click({ clickCount: 3 });
+        await page.keyboard.press("Backspace");
+
+        console.log(`✅ Đã forward\n`);
+      }
+    } catch (error) {
+      if (!error.message.includes("detached Frame")) {
+        console.error(`❌ ${error.message}`);
+      }
+    }
+  }, CHECK_INTERVAL);
 }
 
 runBot();
