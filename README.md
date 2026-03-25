@@ -7,6 +7,9 @@
 - ✅ Giao diện desktop đẹp mắt, dễ sử dụng
 - ✅ Tự động đăng nhập Zalo qua QR code
 - ✅ **Chế độ ẩn (headless)**: Sau khi login lần đầu, bot chạy ngầm không hiện cửa sổ
+- ✅ **Debounce 5 giây**: Batch tin nhắn lại, chỉ gửi khi không có tin mới trong 5 giây
+- ✅ **Hỗ trợ tin nhắn nhiều dòng**: Forward đầy đủ tin nhắn dài, giữ nguyên format xuống dòng
+- ✅ **Nhớ tin nhắn cuối**: Khi dừng và start lại, bot không gửi lại tin nhắn đã forward
 - ✅ Tự động quét và forward tin nhắn giữa các nhóm
 - ✅ Hiển thị log hoạt động realtime
 - ✅ Có thể build thành file .exe để chạy độc lập
@@ -67,6 +70,7 @@ zalo-bot-forward/
 ├── index.html        # Giao diện UI
 ├── styles.css        # CSS styling
 ├── package.json      # Config & dependencies
+├── bot_state.json    # Lưu tin nhắn cuối (auto-generated)
 ├── zalo_session/     # Thư mục lưu session Zalo
 └── dist/             # Thư mục chứa file build (sau khi chạy npm run build)
 ```
@@ -76,7 +80,13 @@ zalo-bot-forward/
 - **Lần đầu chạy**: Cần quét QR code để đăng nhập Zalo. Sau đó cửa sổ Chrome sẽ tự động đóng lại.
 - **Các lần sau**: Bot chạy ở chế độ ẩn (headless), không hiển thị cửa sổ Chrome
 - **Session được lưu**: Không cần quét QR mỗi lần chạy
+- **Debounce mechanism**: Bot **không gửi ngay lập tức**. Thay vào đó:
+  - Khi có tin nhắn mới → thêm vào queue
+  - Đợi 5 giây không có tin mới → gửi tất cả tin trong queue
+  - **Lợi ích**: Nếu có nhiều tin liên tiếp trong 5s, bot sẽ batch lại và gửi 1 lần thay vì gửi từng tin
+- **Nhớ tin nhắn cuối**: Bot lưu tin nhắn cuối vào `bot_state.json`. Khi dừng và start lại, bot sẽ không gửi lại tin nhắn đã forward
 - **Đổi tài khoản**: Xóa thư mục `zalo_session/` để đăng nhập tài khoản khác
+- **Reset bot**: Xóa `bot_state.json` để xóa tin nhắn cuối đã lưu
 - **Thời gian quét**: Nên >= 2000ms để tránh bị Zalo chặn
 - **Chạy ngầm**: Sau khi login, bot sẽ forward tin nhắn ngầm ở background mà không hiển thị trình duyệt
 
@@ -92,6 +102,18 @@ pkill -9 -f Chrome && rm -f zalo_session/SingletonLock
 
 ```bash
 pkill -9 -f Chrome && rm -rf zalo_session
+```
+
+### Reset tin nhắn cuối (gửi lại từ đầu)
+
+```bash
+rm -f bot_state.json
+```
+
+### Reset tất cả (session + state)
+
+```bash
+pkill -9 -f Chrome && rm -rf zalo_session && rm -f bot_state.json
 ```
 
 ## License
