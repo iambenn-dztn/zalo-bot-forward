@@ -41,7 +41,7 @@ File .exe sẽ được tạo trong thư mục `dist/`
 1. Mở ứng dụng
 2. Nhập tên **Nhóm nguồn** (nhóm cần lấy tin nhắn)
 3. Nhập tên **Nhóm đích** (nhóm cần gửi tin nhắn đến)
-4. (Tùy chọn) Điều chỉnh thời gian quét (mặc định: 3000ms = 3 giây)
+4. (Tùy chọn) Điều chỉnh thời gian quét (mặc định: 1000ms = 3 giây)
 5. Nhấn nút **"Bắt đầu"**
 
 ### Lần đầu tiên chạy (chưa có session):

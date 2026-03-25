@@ -7,7 +7,7 @@ puppeteer.use(StealthPlugin());
 
 const SOURCE_GROUP = "Nhóm 1";
 const TARGET_GROUP = "Nhóm 2";
-const CHECK_INTERVAL = 3000;
+const CHECK_INTERVAL = 1000;
 
 async function runBot() {
   const sessionPath = "./zalo_session";

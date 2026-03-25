@@ -21,7 +21,7 @@ class Bot extends EventEmitter {
       console.warn("⚠️ Cảnh báo: Nhóm nguồn và nhóm đích giống nhau!");
     }
 
-    this.checkInterval = config.checkInterval || 3000;
+    this.checkInterval = config.checkInterval || 1000; // 1 giây mặc định
     this.browser = null;
     this.page = null;
     this.intervalId = null;
@@ -71,19 +71,30 @@ class Bot extends EventEmitter {
 
   // Gửi tất cả tin nhắn đang chờ
   async sendPendingMessages() {
-    if (this.pendingMessages.length === 0) return;
+    if (this.pendingMessages.length === 0) {
+      this.emit("log", "⏭️ Queue rỗng, bỏ qua gửi");
+      return;
+    }
 
+    // TẠM DỪNG quét tin nhắn khi đang gửi
+    if (this.intervalId) {
+      clearInterval(this.intervalId);
+      this.intervalId = null;
+      this.emit("log", "⏸️ Tạm dừng quét tin nhắn");
+    }
+
+    // CLEAR QUEUE NGAY để nhận tin mới trong lúc gửi
     const messagesToSend = [...this.pendingMessages];
+    const messageCount = messagesToSend.length;
     this.pendingMessages = [];
 
-    this.emit(
-      "log",
-      `📤 Đang gửi ${messagesToSend.length} tin nhắn đã batch...`,
-    );
+    this.emit("log", `\n========== BẮT ĐẦU GỮI TIN NHẮN ==========`);
+    this.emit("log", `🗑️ Đã clear queue: ${messageCount} tin nhắn`);
+    this.emit("log", `🔍 Xác nhận đang ở nhóm nguồn: "${this.sourceGroup}"`);
 
     try {
-      // Verify đang ở nhóm nguồn trước khi navigate
-      this.emit("log", `🔍 Đang tìm nhóm đích: "${this.targetGroup}"...`);
+      // BƯỚC 1: DI CHUYỂN sang nhóm đích
+      this.emit("log", `\n[BƯỚC 1/3] Tìm nhóm đích: "${this.targetGroup}"...`);
 
       // Navigate đến nhóm đích - GIỐNG CODE TÌM NHÓM NGUỒN
       await this.page.type("#contact-search-input", this.targetGroup);
@@ -96,7 +107,10 @@ class Bot extends EventEmitter {
       await this.page.keyboard.press("Backspace");
       await new Promise((resolve) => setTimeout(resolve, 500));
 
-      this.emit("log", `✓ Đã vào nhóm đích "${this.targetGroup}"`);
+      this.emit("log", `✅ Đã vào nhóm đích: "${this.targetGroup}"\n`);
+
+      // BƯỚC 2: GỮI TỮNG TIN NHẮN
+      this.emit("log", `[BƯỚC 2/3] Gửi ${messageCount} tin nhắn...`);
 
       // Gửi từng tin nhắn
       for (let i = 0; i < messagesToSend.length; i++) {
@@ -115,14 +129,14 @@ class Bot extends EventEmitter {
           }
 
           await richInput.click();
-          await new Promise((resolve) => setTimeout(resolve, 500));
+          await new Promise((resolve) => setTimeout(resolve, 200)); // Giảm từ 500ms → 200ms
 
           // Clear input trước
           await this.page.keyboard.down("Control");
           await this.page.keyboard.press("KeyA");
           await this.page.keyboard.up("Control");
           await this.page.keyboard.press("Backspace");
-          await new Promise((resolve) => setTimeout(resolve, 200));
+          await new Promise((resolve) => setTimeout(resolve, 100)); // Giảm từ 200ms → 100ms
 
           // Xử lý tin nhắn nhiều dòng
           if (msg.includes("\n")) {
@@ -130,24 +144,24 @@ class Bot extends EventEmitter {
             const lines = msg.split("\n");
             for (let j = 0; j < lines.length; j++) {
               if (lines[j]) {
-                await richInput.type(lines[j], { delay: 20 });
+                await richInput.type(lines[j], { delay: 5 }); // Giảm từ 20ms → 5ms (NHANH x4)
               }
               // Nếu không phải dòng cuối, nhấn Shift+Enter để xuống dòng
               if (j < lines.length - 1) {
                 await this.page.keyboard.down("Shift");
                 await this.page.keyboard.press("Enter");
                 await this.page.keyboard.up("Shift");
-                await new Promise((resolve) => setTimeout(resolve, 100));
+                await new Promise((resolve) => setTimeout(resolve, 30)); // Giảm từ 100ms → 30ms
               }
             }
           } else {
             // Tin nhắn 1 dòng, type bình thường
-            await richInput.type(msg, { delay: 30 });
+            await richInput.type(msg, { delay: 5 }); // Giảm từ 30ms → 5ms (NHANH x6)
           }
 
-          await new Promise((resolve) => setTimeout(resolve, 500));
+          await new Promise((resolve) => setTimeout(resolve, 200)); // Giảm từ 500ms → 200ms
           await this.page.keyboard.press("Enter");
-          await new Promise((resolve) => setTimeout(resolve, 1500));
+          await new Promise((resolve) => setTimeout(resolve, 800)); // Giảm từ 1500ms → 800ms
         } catch (error) {
           this.emit("error", `Lỗi gửi tin ${i + 1}: ${error.message}`);
         }
@@ -155,10 +169,11 @@ class Bot extends EventEmitter {
 
       this.emit(
         "log",
-        `✅ Đã gửi ${messagesToSend.length} tin nhắn đến "${this.targetGroup}"\n`,
+        `\n✅ Đã gửi xong ${messagesToSend.length} tin nhắn đến "${this.targetGroup}"`,
       );
 
-      // Navigate back về nhóm nguồn
+      // BƯỚC 3: QUAY VỀ NHÓM NGUỒN
+      this.emit("log", `\n[BƯỚC 3/3] Quay về nhóm nguồn...`);
       await this.navigateBackToSource();
     } catch (error) {
       this.emit("error", `❌ Lỗi khi gửi batch: ${error.message}`);
@@ -170,7 +185,7 @@ class Bot extends EventEmitter {
   // Navigate về nhóm nguồn
   async navigateBackToSource() {
     try {
-      this.emit("log", `🔙 Đang quay về nhóm nguồn: "${this.sourceGroup}"...`);
+      this.emit("log", `🔙 Tìm nhóm nguồn: "${this.sourceGroup}"...`);
 
       // GIỐNG CODE TÌM NHÓM NGUỒN
       await this.page.type("#contact-search-input", this.sourceGroup);
@@ -183,7 +198,16 @@ class Bot extends EventEmitter {
       await this.page.keyboard.press("Backspace");
       await new Promise((resolve) => setTimeout(resolve, 500));
 
-      this.emit("log", `✓ Đã về nhóm nguồn\n`);
+      this.emit("log", `✅ Đã về nhóm nguồn: "${this.sourceGroup}"`);
+      this.emit("log", `🔄 Tiếp tục quét tin nhắn tại nhóm nguồn...`);
+      this.emit("log", `========== KẾT THÚC GỮI TIN NHẮN ==========\n`);
+
+      // KHỞI ĐỘNG LẠI quét tin nhắn
+      this.startScanning();
+      this.emit(
+        "log",
+        `▶️ Đã khởi động lại quét tin nhắn (mỗi ${this.checkInterval}ms)\n`,
+      );
     } catch (error) {
       this.emit("error", `Lỗi khi về nhóm nguồn: ${error.message}`);
     }
@@ -202,14 +226,13 @@ class Bot extends EventEmitter {
       this.emit(
         "status",
         hasSession
-          ? "Đang khởi động ở chế độ ẩn..."
+          ? "Đang khởi động với giao diện (DEBUG MODE)..."
           : "Đang khởi động... (Cần quét QR)",
       );
 
-      // Nếu chưa có session, hiện cửa sổ để scan QR
-      // Nếu đã có session, chạy headless ngay
+      // DEBUG MODE: Luôn hiện giao diện Chrome
       this.browser = await puppeteer.launch({
-        headless: hasSession, // Headless nếu đã có session
+        headless: false, // DEBUG: Tắt headless để xem giao diện
         userDataDir: this.sessionPath,
         args: [
           "--start-maximized",
@@ -223,7 +246,27 @@ class Bot extends EventEmitter {
         defaultViewport: null,
       });
 
-      this.page = await this.browser.newPage();
+      // Đóng tất cả tab hiện tại và tạo tab mới
+      const pages = await this.browser.pages();
+      this.emit(
+        "log",
+        `🗑️ Tìm thấy ${pages.length} tab, đang đóng các tab cũ...`,
+      );
+
+      // Đóng tất cả tab trừ tab đầu tiên
+      for (let i = 1; i < pages.length; i++) {
+        await pages[i].close();
+      }
+
+      // Sử dụng tab đầu tiên hoặc tạo mới nếu không có
+      if (pages.length > 0) {
+        this.page = pages[0];
+      } else {
+        this.page = await this.browser.newPage();
+      }
+
+      this.emit("log", `✓ Chỉ giữ lại 1 tab`);
+
       await this.page.setViewport({ width: 1366, height: 768 });
       await this.page.goto("https://chat.zalo.me/", {
         waitUntil: "networkidle2",
@@ -236,36 +279,36 @@ class Bot extends EventEmitter {
       await this.page.waitForSelector("#contact-search-input", { timeout: 0 });
       this.emit("status", "✅ Đã đăng nhập thành công");
 
-      // Nếu vừa login lần đầu (không có session), restart với headless
-      if (!hasSession) {
-        this.emit("log", "Đang khởi động lại ở chế độ ẩn...");
-        await this.browser.close();
-        await new Promise((resolve) => setTimeout(resolve, 2000));
+      // DEBUG MODE: Bỏ qua restart, giữ nguyên giao diện
+      // if (!hasSession) {
+      //   this.emit("log", "Đang khởi động lại ở chế độ ẩn...");
+      //   await this.browser.close();
+      //   await new Promise((resolve) => setTimeout(resolve, 2000));
 
-        // Launch lại với headless
-        this.browser = await puppeteer.launch({
-          headless: true,
-          userDataDir: this.sessionPath,
-          args: [
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-accelerated-2d-canvas",
-            "--disable-gpu",
-            "--disable-blink-features=AutomationControlled",
-          ],
-        });
+      //   // Launch lại với headless
+      //   this.browser = await puppeteer.launch({
+      //     headless: false,
+      //     userDataDir: this.sessionPath,
+      //     args: [
+      //       "--no-sandbox",
+      //       "--disable-setuid-sandbox",
+      //       "--disable-dev-shm-usage",
+      //       "--disable-accelerated-2d-canvas",
+      //       "--disable-gpu",
+      //       "--disable-blink-features=AutomationControlled",
+      //     ],
+      //   });
 
-        this.page = await this.browser.newPage();
-        await this.page.setViewport({ width: 1366, height: 768 });
-        await this.page.goto("https://chat.zalo.me/", {
-          waitUntil: "networkidle2",
-        });
-        await this.page.waitForSelector("#contact-search-input", {
-          timeout: 30000,
-        });
-        this.emit("status", "✅ Đã chuyển sang chế độ ẩn");
-      }
+      //   this.page = await this.browser.newPage();
+      //   await this.page.setViewport({ width: 1366, height: 768 });
+      //   await this.page.goto("https://chat.zalo.me/", {
+      //     waitUntil: "networkidle2",
+      //   });
+      //   await this.page.waitForSelector("#contact-search-input", {
+      //     timeout: 10000,
+      //   });
+      //   this.emit("status", "✅ Đã chuyển sang chế độ ẩn");
+      // }
 
       this.emit("log", "Đang tìm nhóm nguồn...");
 
@@ -312,25 +355,48 @@ class Bot extends EventEmitter {
           const frames = document.querySelectorAll(".message-frame");
           for (let i = frames.length - 1; i >= 0; i--) {
             if (!frames[i].classList.contains("me")) {
-              const textSpan = frames[i].querySelector("span.text");
-              if (textSpan) {
-                // Thử innerText trước (giữ nguyên newlines)
-                let text = textSpan.innerText;
+              let text = "";
 
-                // Nếu không có innerText, dùng cách parse HTML
-                if (!text || text.trim() === "") {
-                  let html = textSpan.innerHTML;
-                  html = html.replace(/<br\s*\/?>/gi, "\n");
-                  html = html.replace(/<\/(div|p)>/gi, "\n");
-                  html = html.replace(/<[^>]*>/g, "");
-                  const txt = document.createElement("textarea");
-                  txt.innerHTML = html;
-                  text = txt.value;
-                }
-
-                text = text.trim();
-                if (text) return text;
+              // Tìm container message-text-content (chứa TOÀN BỘ tin nhắn dài)
+              const textContainer = frames[i].querySelector(
+                '[data-component="message-text-content"]',
+              );
+              if (textContainer) {
+                text =
+                  textContainer.innerText || textContainer.textContent || "";
               }
+
+              // Nếu không có, thử lấy từ text-message__container
+              if (!text || text.trim() === "") {
+                const msgContainer = frames[i].querySelector(
+                  ".text-message__container",
+                );
+                if (msgContainer) {
+                  text =
+                    msgContainer.innerText || msgContainer.textContent || "";
+                }
+              }
+
+              // Fallback: lấy từ span.text (tin nhắn ngắn)
+              if (!text || text.trim() === "") {
+                const textSpan = frames[i].querySelector("span.text");
+                if (textSpan) {
+                  text = textSpan.innerText;
+
+                  if (!text || text.trim() === "") {
+                    let html = textSpan.innerHTML;
+                    html = html.replace(/<br\s*\/?>/gi, "\n");
+                    html = html.replace(/<\/(div|p)>/gi, "\n");
+                    html = html.replace(/<[^>]*>/g, "");
+                    const txt = document.createElement("textarea");
+                    txt.innerHTML = html;
+                    text = txt.value;
+                  }
+                }
+              }
+
+              text = text.trim();
+              if (text) return text;
             }
           }
           return "";
@@ -354,10 +420,16 @@ class Bot extends EventEmitter {
           // Clear timer cũ và set timer mới (debounce)
           if (this.debounceTimer) {
             clearTimeout(this.debounceTimer);
+            this.emit("log", `🔄 Reset timer 5s (có tin nhắn mới)`);
+          } else {
+            this.emit("log", `⏱️ Bắt đầu đếm 5s...`);
           }
 
           this.debounceTimer = setTimeout(async () => {
-            this.emit("log", `⏰ Hết thời gian debounce (5s), bắt đầu gửi...`);
+            this.emit(
+              "log",
+              `⏰ Hết 5s không có tin nhắn mới → Bắt đầu di chuyển sang nhóm đích...`,
+            );
             await this.sendPendingMessages();
           }, this.debounceDelay);
         }
