@@ -1,11 +1,13 @@
 {
   "name": "zalo-bot-forward",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Zalo Bot Forward Messages",
+  "main": "main.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node index.js"
+    "start": "electron .",
+    "build": "electron-builder",
+    "build:win": "electron-builder --win --x64"
   },
   "keywords": [],
   "author": "",
@@ -14,5 +16,28 @@
     "puppeteer": "^24.40.0",
     "puppeteer-extra": "^3.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2"
+  },
+  "devDependencies": {
+    "electron": "^28.0.0",
+    "electron-builder": "^24.9.1"
+  },
+  "build": {
+    "appId": "com.zalobot.forward",
+    "productName": "Zalo Bot Forward",
+    "win": {
+      "target": "nsis",
+      "icon": "build/icon.ico"
+    },
+    "files": [
+      "main.js",
+      "bot.js",
+      "renderer.js",
+      "index.html",
+      "styles.css",
+      "node_modules/**/*"
+    ],
+    "directories": {
+      "output": "dist"
+    }
   }
 }

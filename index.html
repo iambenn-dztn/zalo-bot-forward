@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="vi">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Zalo Bot Forward</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🤖 Zalo Bot Forward</h1>
+            <p class="subtitle">Tự động forward tin nhắn giữa các nhóm</p>
+        </div>
+
+        <div class="config-section">
+            <div class="form-group">
+                <label for="sourceGroup">Nhóm nguồn (lấy tin nhắn):</label>
+                <input type="text" id="sourceGroup" placeholder="Nhập tên nhóm nguồn" value="Nhóm 1">
+            </div>
+
+            <div class="form-group">
+                <label for="targetGroup">Nhóm đích (gửi tin nhắn):</label>
+                <input type="text" id="targetGroup" placeholder="Nhập tên nhóm đích" value="Nhóm 2">
+            </div>
+
+            <div class="form-group">
+                <label for="checkInterval">Thời gian quét (ms):</label>
+                <input type="number" id="checkInterval" value="3000" min="1000" step="100">
+            </div>
+
+            <div class="button-group">
+                <button id="startBtn" class="btn btn-start">▶ Bắt đầu</button>
+                <button id="stopBtn" class="btn btn-stop" disabled>⏹ Dừng lại</button>
+            </div>
+        </div>
+
+        <div class="status-section">
+            <div class="status-header">
+                <h3>Trạng thái</h3>
+                <span id="statusIndicator" class="status-indicator idle">⚪ Chưa chạy</span>
+            </div>
+            <div id="statusText" class="status-text">
+                Nhập thông tin và nhấn "Bắt đầu" để chạy bot
+            </div>
+        </div>
+
+        <div class="log-section">
+            <div class="log-header">
+                <h3>Nhật ký hoạt động</h3>
+                <button id="clearLogBtn" class="btn-clear">🗑️ Xóa log</button>
+            </div>
+            <div id="logContainer" class="log-container">
+                <div class="log-entry">Chờ khởi động...</div>
+            </div>
+        </div>
+    </div>
+
+    <script src="renderer.js"></script>
+</body>
+
+</html>
