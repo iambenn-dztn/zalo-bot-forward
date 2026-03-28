@@ -1,5 +1,6 @@
 const { app, BrowserWindow, ipcMain } = require("electron");
 const path = require("path");
+const fs = require("fs");
 const Bot = require("./bot");
 
 let mainWindow;
@@ -73,5 +74,29 @@ ipcMain.on("stop-bot", (event) => {
   if (bot) {
     bot.stop();
     event.reply("bot-status", "Bot đã dừng");
+  }
+});
+
+ipcMain.on("clear-session", (event) => {
+  try {
+    const sessionPath = path.join(__dirname, "zalo_session");
+    const statePath = path.join(__dirname, "bot_state.json");
+
+    // Xóa folder session
+    if (fs.existsSync(sessionPath)) {
+      fs.rmSync(sessionPath, { recursive: true, force: true });
+    }
+
+    // Xóa file state
+    if (fs.existsSync(statePath)) {
+      fs.unlinkSync(statePath);
+    }
+
+    event.reply(
+      "session-cleared",
+      "✅ Đã xóa session và bot state thành công!",
+    );
+  } catch (error) {
+    event.reply("session-clear-error", error.message);
   }
 });

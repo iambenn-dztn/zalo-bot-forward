@@ -10,6 +10,7 @@ const statusIndicator = document.getElementById("statusIndicator");
 const statusText = document.getElementById("statusText");
 const logContainer = document.getElementById("logContainer");
 const clearLogBtn = document.getElementById("clearLogBtn");
+const clearSessionBtn = document.getElementById("clearSessionBtn");
 
 let isRunning = false;
 
@@ -66,6 +67,7 @@ startBtn.addEventListener("click", () => {
     sourceGroup,
     targetGroup,
     checkInterval,
+    subId: "justj", // Hard coded
   });
 });
 
@@ -87,6 +89,19 @@ clearLogBtn.addEventListener("click", () => {
   logContainer.innerHTML = '<div class="log-entry">Log đã được xóa</div>';
 });
 
+// Clear session
+clearSessionBtn.addEventListener("click", () => {
+  if (isRunning) {
+    alert("Vui lòng dừng bot trước khi xóa session!");
+    return;
+  }
+
+  if (confirm("⚠️ Bạn có chắc muốn xóa session hiện tại?\n\nSau khi xóa, bạn sẽ cần quét QR code để đăng nhập lại.")) {
+    addLog("Đang xóa session...", "info");
+    ipcRenderer.send("clear-session");
+  }
+});
+
 // IPC Listeners
 ipcRenderer.on("bot-status", (event, message) => {
   updateStatus(message, "running");
@@ -100,6 +115,16 @@ ipcRenderer.on("bot-log", (event, message) => {
 ipcRenderer.on("bot-error", (event, message) => {
   updateStatus(`Lỗi: ${message}`, "error");
   addLog(message, "error");
+});
+
+ipcRenderer.on("session-cleared", (event, message) => {
+  addLog(message, "success");
+  alert("✅ Đã xóa session thành công!\n\nBạn có thể khởi động bot để đăng nhập lại.");
+});
+
+ipcRenderer.on("session-clear-error", (event, message) => {
+  addLog(message, "error");
+  alert("❌ Lỗi khi xóa session: " + message);
 });
 
 // Initialize
