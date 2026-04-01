@@ -26,12 +26,12 @@
     "appId": "com.zalobot.forward",
     "productName": "Zalo Bot Forward",
     "win": {
-      "target": "nsis",
-      "icon": "build/icon.ico"
+      "target": "nsis"
     },
     "files": [
       "main.js",
       "bot.js",
+      "util.js",
       "renderer.js",
       "index.html",
       "styles.css",
