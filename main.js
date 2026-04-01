@@ -2,9 +2,50 @@ const { app, BrowserWindow, ipcMain } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const Bot = require("./bot");
-
 let mainWindow;
 let bot = null;
+
+// Xóa đúng session theo sessionId hoặc sessionPath
+ipcMain.on(
+  "clear-session-by-id",
+  (event, { sessionId, sessionPath, stateFilePath, imagesPath }) => {
+    try {
+      // Ưu tiên sessionPath, nếu không có thì tạo từ sessionId
+      let sessionFolder = sessionPath;
+      if (!sessionFolder && sessionId) {
+        sessionFolder = path.join(__dirname, `zalo_session_${sessionId}`);
+      }
+      if (sessionFolder && fs.existsSync(sessionFolder)) {
+        fs.rmSync(sessionFolder, { recursive: true, force: true });
+      }
+
+      // Xóa file state nếu có
+      let stateFile = stateFilePath;
+      if (!stateFile && sessionId) {
+        stateFile = path.join(__dirname, `bot_state_${sessionId}.json`);
+      }
+      if (stateFile && fs.existsSync(stateFile)) {
+        fs.unlinkSync(stateFile);
+      }
+
+      // Xóa images folder nếu có
+      let imgFolder = imagesPath;
+      if (!imgFolder && sessionId) {
+        imgFolder = path.join(__dirname, `images_${sessionId}`);
+      }
+      if (imgFolder && fs.existsSync(imgFolder)) {
+        fs.rmSync(imgFolder, { recursive: true, force: true });
+      }
+
+      event.reply(
+        "session-cleared",
+        `✅ Đã xóa session, state và images cho phiên: ${sessionId || sessionPath}`,
+      );
+    } catch (error) {
+      event.reply("session-clear-error", error.message);
+    }
+  },
+);
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -79,22 +120,31 @@ ipcMain.on("stop-bot", (event) => {
 
 ipcMain.on("clear-session", (event) => {
   try {
-    const sessionPath = path.join(__dirname, "zalo_session");
-    const statePath = path.join(__dirname, "bot_state.json");
-
-    // Xóa folder session
-    if (fs.existsSync(sessionPath)) {
-      fs.rmSync(sessionPath, { recursive: true, force: true });
+    // Xóa tất cả các folder session bắt đầu bằng zalo_session
+    const sessionFolders = fs
+      .readdirSync(__dirname)
+      .filter((f) => f.startsWith("zalo_session"));
+    for (const folder of sessionFolders) {
+      const fullPath = path.join(__dirname, folder);
+      if (fs.existsSync(fullPath) && fs.lstatSync(fullPath).isDirectory()) {
+        fs.rmSync(fullPath, { recursive: true, force: true });
+      }
     }
 
-    // Xóa file state
-    if (fs.existsSync(statePath)) {
-      fs.unlinkSync(statePath);
+    // Xóa tất cả các file state bắt đầu bằng bot_state_
+    const stateFiles = fs
+      .readdirSync(__dirname)
+      .filter((f) => f.startsWith("bot_state_") && f.endsWith(".json"));
+    for (const file of stateFiles) {
+      const fullPath = path.join(__dirname, file);
+      if (fs.existsSync(fullPath) && fs.lstatSync(fullPath).isFile()) {
+        fs.unlinkSync(fullPath);
+      }
     }
 
     event.reply(
       "session-cleared",
-      "✅ Đã xóa session và bot state thành công!",
+      "✅ Đã xóa toàn bộ session và bot state thành công!",
     );
   } catch (error) {
     event.reply("session-clear-error", error.message);

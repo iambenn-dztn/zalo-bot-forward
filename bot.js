@@ -1,6 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const puppeteer = require("puppeteer-extra");
+const { executablePath } = require("puppeteer");
 const StealthPlugin = require("puppeteer-extra-plugin-stealth");
 const { EventEmitter } = require("events");
 const { transformText } = require("./util");
@@ -28,9 +29,18 @@ class Bot extends EventEmitter {
     this.intervalId = null;
     this.lastMessage = "";
     this.scanCount = 0;
-    this.sessionPath = "./zalo_session";
-    this.stateFilePath = "./bot_state.json";
-    this.imagesPath = "./images"; // Folder lưu ảnh
+
+    // Cho phép truyền sessionId hoặc sessionPath qua config, nếu không thì tạo random
+    let sessionId = config.sessionId;
+    if (!sessionId) {
+      // Tạo sessionId từ group hoặc random
+      sessionId = `${this.sourceGroup || "src"}_${this.targetGroup || "tgt"}_${Math.random().toString(36).slice(2, 8)}`;
+    }
+    this.sessionId = sessionId;
+    this.sessionPath = config.sessionPath || `./zalo_session_${this.sessionId}`;
+    this.stateFilePath =
+      config.stateFilePath || `./bot_state_${this.sessionId}.json`;
+    this.imagesPath = config.imagesPath || `./images_${this.sessionId}`;
 
     // Tạo thư mục images nếu chưa tồn tại
     if (!fs.existsSync(this.imagesPath)) {
@@ -1121,7 +1131,17 @@ class Bot extends EventEmitter {
 
       this.startScanning();
     } catch (error) {
-      this.emit("error", `Lỗi khởi động: ${error.message}`);
+      if (error.message && error.message.includes("Could not find Chrome")) {
+        this.emit(
+          "error",
+          `❌ Không tìm thấy Chrome/Chromium cho Puppeteer.\n` +
+            `Vui lòng cài đặt Chrome hoặc chạy lệnh:\n` +
+            `    npx puppeteer browsers install chrome\n` +
+            `Hoặc xem hướng dẫn tại: https://pptr.dev/guides/configuration`,
+        );
+      } else {
+        this.emit("error", `Lỗi khởi động: ${error.message}`);
+      }
       this.stop();
     }
   }

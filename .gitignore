@@ -1,5 +1,7 @@
 /node_modules
 /zalo_session
+/zalo_session*
+*.json
 /dist
 bot_state.json
 /images/
