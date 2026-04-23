@@ -1,9 +1,11 @@
 const { ipcRenderer } = require("electron");
 
 // DOM Elements
-const sourceGroupInput = document.getElementById("sourceGroup");
+const sourceGroupsInput = document.getElementById("sourceGroups");
 const targetGroupInput = document.getElementById("targetGroup");
 const checkIntervalInput = document.getElementById("checkInterval");
+const forwardIntervalInput = document.getElementById("forwardInterval");
+const chromePathInput = document.getElementById("chromePath");
 const startBtn = document.getElementById("startBtn");
 const stopBtn = document.getElementById("stopBtn");
 const statusIndicator = document.getElementById("statusIndicator");
@@ -14,7 +16,6 @@ const clearSessionBtn = document.getElementById("clearSessionBtn");
 
 let isRunning = false;
 
-// Add log entry
 function addLog(message, type = "info") {
   const logEntry = document.createElement("div");
   logEntry.className = `log-entry ${type}`;
@@ -23,11 +24,9 @@ function addLog(message, type = "info") {
   logContainer.scrollTop = logContainer.scrollHeight;
 }
 
-// Update status
 function updateStatus(message, state = "idle") {
   statusText.textContent = message;
   statusIndicator.className = `status-indicator ${state}`;
-
   if (state === "running") {
     statusIndicator.textContent = "🟢 Đang chạy";
   } else if (state === "error") {
@@ -37,37 +36,53 @@ function updateStatus(message, state = "idle") {
   }
 }
 
+function setInputsDisabled(disabled) {
+  sourceGroupsInput.disabled = disabled;
+  targetGroupInput.disabled = disabled;
+  checkIntervalInput.disabled = disabled;
+  forwardIntervalInput.disabled = disabled;
+  chromePathInput.disabled = disabled;
+}
+
 // Start bot
 startBtn.addEventListener("click", () => {
-  const sourceGroup = sourceGroupInput.value.trim();
+  // Parse nhóm nguồn: mỗi dòng 1 nhóm, bỏ dòng trống
+  const sourceGroups = sourceGroupsInput.value
+    .split("\n")
+    .map((s) => s.trim())
+    .filter(Boolean);
   const targetGroup = targetGroupInput.value.trim();
   const checkInterval = parseInt(checkIntervalInput.value);
+  const forwardInterval = parseInt(forwardIntervalInput.value);
+  const chromePath = chromePathInput.value.trim();
 
-  if (!sourceGroup || !targetGroup) {
-    alert("Vui lòng nhập đầy đủ tên nhóm nguồn và nhóm đích!");
+  if (sourceGroups.length === 0 || !targetGroup) {
+    alert("Vui lòng nhập ít nhất 1 nhóm nguồn và nhóm đích!");
     return;
   }
-
   if (checkInterval < 1000) {
     alert("Thời gian quét phải >= 1000ms!");
+    return;
+  }
+  if (forwardInterval < 10000) {
+    alert("Chu kỳ forward phải >= 10000ms (10 giây)!");
     return;
   }
 
   isRunning = true;
   startBtn.disabled = true;
   stopBtn.disabled = false;
-  sourceGroupInput.disabled = true;
-  targetGroupInput.disabled = true;
-  checkIntervalInput.disabled = true;
+  setInputsDisabled(true);
 
   updateStatus("Đang khởi động bot...", "running");
-  addLog("Đang khởi động bot...", "info");
+  addLog(`Đang khởi động bot (${sourceGroups.length} nhóm nguồn)...`, "info");
 
   ipcRenderer.send("start-bot", {
-    sourceGroup,
+    sourceGroups,
     targetGroup,
     checkInterval,
-    subId: "justj", // Hard coded
+    forwardInterval,
+    chromePath: chromePath || undefined,
   });
 });
 
@@ -77,9 +92,7 @@ stopBtn.addEventListener("click", () => {
   isRunning = false;
   startBtn.disabled = false;
   stopBtn.disabled = true;
-  sourceGroupInput.disabled = false;
-  targetGroupInput.disabled = false;
-  checkIntervalInput.disabled = false;
+  setInputsDisabled(false);
   updateStatus("Bot đã dừng", "idle");
   addLog("Bot đã dừng", "info");
 });
@@ -95,8 +108,11 @@ clearSessionBtn.addEventListener("click", () => {
     alert("Vui lòng dừng bot trước khi xóa session!");
     return;
   }
-
-  if (confirm("⚠️ Bạn có chắc muốn xóa session hiện tại?\n\nSau khi xóa, bạn sẽ cần quét QR code để đăng nhập lại.")) {
+  if (
+    confirm(
+      "⚠️ Bạn có chắc muốn xóa session hiện tại?\n\nSau khi xóa, bạn sẽ cần quét QR code để đăng nhập lại.",
+    )
+  ) {
     addLog("Đang xóa session...", "info");
     ipcRenderer.send("clear-session");
   }
@@ -119,7 +135,9 @@ ipcRenderer.on("bot-error", (event, message) => {
 
 ipcRenderer.on("session-cleared", (event, message) => {
   addLog(message, "success");
-  alert("✅ Đã xóa session thành công!\n\nBạn có thể khởi động bot để đăng nhập lại.");
+  alert(
+    "✅ Đã xóa session thành công!\n\nBạn có thể khởi động bot để đăng nhập lại.",
+  );
 });
 
 ipcRenderer.on("session-clear-error", (event, message) => {

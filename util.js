@@ -33,6 +33,7 @@ async function transformText(text) {
         "Content-Type": "application/json",
       },
       data: { text: replacedText },
+      timeout: 5000,
     };
 
     const response = await axios.request(config);

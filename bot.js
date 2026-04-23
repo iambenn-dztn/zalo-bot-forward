@@ -1,1017 +1,128 @@
 const fs = require("fs");
 const path = require("path");
 const puppeteer = require("puppeteer-extra");
-const { executablePath } = require("puppeteer");
 const StealthPlugin = require("puppeteer-extra-plugin-stealth");
 const { EventEmitter } = require("events");
 const { transformText } = require("./util");
 
 puppeteer.use(StealthPlugin());
 
+const SESSION_PATH = "./zalo_session";
+const IMAGES_PATH = "./images";
+const MESSAGES_FILE = "./messages.json";
+const STATE_FILE = "./bot_state.json";
+
 class Bot extends EventEmitter {
   constructor(config) {
     super();
-    this.sourceGroup = config.sourceGroup;
+    this.sourceGroups = config.sourceGroups || [];
     this.targetGroup = config.targetGroup;
+    // Thoi gian cho sau khi navigate vao nhom de DOM load (ms)
+    this.checkInterval = config.checkInterval || 3000;
+    // Chu ky forward (ms) - mac dinh 30 giay
+    this.forwardInterval = config.forwardInterval || 30000;
+    // Duong dan Chrome executable (de trong neu dung mac dinh cua Puppeteer)
+    this.chromePath = config.chromePath || undefined;
 
-    // Validation
-    if (!this.sourceGroup || !this.targetGroup) {
-      console.error("❌ Lỗi: Nhóm nguồn hoặc nhóm đích không được để trống!");
-    }
-
-    if (this.sourceGroup === this.targetGroup) {
-      console.warn("⚠️ Cảnh báo: Nhóm nguồn và nhóm đích giống nhau!");
-    }
-
-    this.checkInterval = config.checkInterval || 1000; // 1 giây mặc định
     this.browser = null;
-    this.page = null;
-    this.intervalId = null;
-    this.lastMessage = "";
-    this.scanCount = 0;
+    this.page = null; // 1 tab duy nhat
+    this.running = false;
 
-    // Cho phép truyền sessionId hoặc sessionPath qua config, nếu không thì tạo random
-    let sessionId = config.sessionId;
-    if (!sessionId) {
-      // Tạo sessionId từ group hoặc random
-      sessionId = `${this.sourceGroup || "src"}_${this.targetGroup || "tgt"}_${Math.random().toString(36).slice(2, 8)}`;
-    }
-    this.sessionId = sessionId;
-    this.sessionPath = config.sessionPath || `./zalo_session_${this.sessionId}`;
-    this.stateFilePath =
-      config.stateFilePath || `./bot_state_${this.sessionId}.json`;
-    this.imagesPath = config.imagesPath || `./images_${this.sessionId}`;
+    // Theo doi tin nhan da thay per group
+    this.seenFrameIds = {};
+    this.groupInitialized = {};
 
-    // Tạo thư mục images nếu chưa tồn tại
-    if (!fs.existsSync(this.imagesPath)) {
-      fs.mkdirSync(this.imagesPath, { recursive: true });
+    // In-memory queue + async lock
+    this.messageQueue = [];
+    this._queueLock = Promise.resolve();
+
+    if (!fs.existsSync(IMAGES_PATH)) {
+      fs.mkdirSync(IMAGES_PATH, { recursive: true });
     }
 
-    // Debounce mechanism
-    this.pendingMessages = []; // Mảng chứa tin nhắn chờ gửi
-    this.debounceTimer = null; // Timer cho debounce
-    this.debounceDelay = 5000; // 5 giây debounce
-
-    // Đọc last message từ file khi khởi tạo
-    this.loadLastMessage();
+    // Phuc hoi tin nhan chua gui tu lan chay truoc
+    this.messageQueue = this._loadQueueFromDisk();
   }
 
-  // Lưu tin nhắn cuối cùng vào file
-  saveLastMessage(message) {
+  // ─── QUEUE helpers ────────────────────────────────────────────────────────
+
+  _loadQueueFromDisk() {
     try {
-      const state = {
-        lastMessage: message,
-        timestamp: new Date().toISOString(),
-        sourceGroup: this.sourceGroup,
-        targetGroup: this.targetGroup,
-      };
-      fs.writeFileSync(this.stateFilePath, JSON.stringify(state, null, 2));
-    } catch (error) {
-      this.emit("log", `⚠️ Không thể lưu state: ${error.message}`);
-    }
+      if (fs.existsSync(MESSAGES_FILE)) {
+        const raw = fs.readFileSync(MESSAGES_FILE, "utf8");
+        return JSON.parse(raw);
+      }
+    } catch { /* ignore corrupt file */ }
+    return [];
   }
 
-  // Đọc tin nhắn cuối cùng từ file
-  loadLastMessage() {
+  _flushQueueToDisk() {
     try {
-      if (fs.existsSync(this.stateFilePath)) {
-        const state = JSON.parse(fs.readFileSync(this.stateFilePath, "utf8"));
-        if (state.lastMessage) {
-          this.lastMessage = state.lastMessage;
-          this.emit("log", `📝 Đã tải tin nhắn cuối: "${this.lastMessage}"`);
-        }
-      }
-    } catch (error) {
-      this.emit("log", `⚠️ Không thể đọc state: ${error.message}`);
-    }
-  }
-
-  // Download ảnh từ blob URL
-  async downloadImage(blobUrl, fileName) {
-    try {
-      this.emit("log", `   🔄 Đang fetch blob URL...`);
-
-      const base64Data = await this.page.evaluate(async (url) => {
-        try {
-          const response = await fetch(url);
-          if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
-          }
-          const blob = await response.blob();
-          return new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onloadend = () => resolve(reader.result);
-            reader.onerror = () => reject(new Error("FileReader error"));
-            reader.readAsDataURL(blob);
-          });
-        } catch (error) {
-          return `ERROR: ${error.message}`;
-        }
-      }, blobUrl);
-
-      if (typeof base64Data === "string" && base64Data.startsWith("ERROR:")) {
-        throw new Error(base64Data);
-      }
-
-      if (!base64Data || !base64Data.includes("base64,")) {
-        throw new Error("Invalid base64 data received");
-      }
-
-      this.emit("log", `   💾 Đang lưu file...`);
-
-      const base64Image = base64Data.split(";base64,").pop();
-      // Sử dụng absolute path để Puppeteer có thể upload file
-      const filePath = path.resolve(this.imagesPath, fileName);
-      fs.writeFileSync(filePath, base64Image, { encoding: "base64" });
-
-      const stats = fs.statSync(filePath);
-      this.emit(
-        "log",
-        `   ✅ Đã lưu ảnh: ${fileName} (${(stats.size / 1024).toFixed(2)} KB)`,
+      fs.writeFileSync(
+        MESSAGES_FILE,
+        JSON.stringify(this.messageQueue, null, 2),
+        "utf8",
       );
-      this.emit("log", `   📂 Đường dẫn đầy đủ: ${filePath}`);
-
-      return filePath;
-    } catch (error) {
-      this.emit("error", `   ❌ Lỗi khi tải ảnh: ${error.message}`);
-      return null;
+    } catch (err) {
+      this.emit("error", `Loi ghi queue ra disk: ${err.message}`);
     }
   }
 
-  // Gửi tất cả tin nhắn đang chờ
-  async sendPendingMessages() {
-    if (this.pendingMessages.length === 0) {
-      this.emit("log", "⏭️ Queue rỗng, bỏ qua gửi");
-      return;
-    }
-
-    // TẠM DỪNG quét tin nhắn khi đang gửi
-    if (this.intervalId) {
-      clearInterval(this.intervalId);
-      this.intervalId = null;
-      this.emit("log", "⏸️ Tạm dừng quét tin nhắn");
-    }
-
-    // CLEAR QUEUE NGAY để nhận tin mới trong lúc gửi
-    const messagesToSend = [...this.pendingMessages];
-    const messageCount = messagesToSend.length;
-    this.pendingMessages = [];
-
-    this.emit("log", `\n========== BẮT ĐẦU GỮI TIN NHẮN ==========`);
-    this.emit("log", `🗑️ Đã clear queue: ${messageCount} tin nhắn`);
-    this.emit("log", `🔍 Xác nhận đang ở nhóm nguồn: "${this.sourceGroup}"`);
-
+  async _withQueueLock(fn) {
+    const prev = this._queueLock;
+    let resolve;
+    this._queueLock = new Promise((r) => { resolve = r; });
+    await prev;
     try {
-      // BƯỚC 1: DI CHUYỂN sang nhóm đích
-      this.emit("log", `\n[BƯỚC 1/3] Tìm nhóm đích: "${this.targetGroup}"...`);
-
-      // Navigate đến nhóm đích - GIỐNG CODE TÌM NHÓM NGUỒN
-      await this.page.type("#contact-search-input", this.targetGroup);
-      await new Promise((resolve) => setTimeout(resolve, 1500));
-      await this.page.keyboard.press("Enter");
-      await new Promise((resolve) => setTimeout(resolve, 2500));
-
-      const searchInput = await this.page.$("#contact-search-input");
-      await searchInput.click({ clickCount: 3 });
-      await this.page.keyboard.press("Backspace");
-      await new Promise((resolve) => setTimeout(resolve, 500));
-
-      this.emit("log", `✅ Đã vào nhóm đích: "${this.targetGroup}"\n`);
-
-      // BƯỚC 2: GỮI TỮNG TIN NHẮN
-      this.emit("log", `[BƯỚC 2/3] Gửi ${messageCount} tin nhắn...`);
-
-      // Gửi từng tin nhắn
-      for (let i = 0; i < messagesToSend.length; i++) {
-        const msg = messagesToSend[i];
-
-        try {
-          if (msg.type === "text") {
-            // GỬI TEXT
-            this.emit(
-              "log",
-              `  ${i + 1}/${messagesToSend.length}. Gửi text: "${msg.content.substring(0, 50)}${msg.content.length > 50 ? "..." : ""}"`,
-            );
-
-            const richInput = await this.page.$("#richInput");
-            if (!richInput) {
-              this.emit("error", "Không tìm thấy input box");
-              continue;
-            }
-
-            await richInput.click();
-            await new Promise((resolve) => setTimeout(resolve, 200));
-
-            // Clear input trước
-            await this.page.keyboard.down("Control");
-            await this.page.keyboard.press("KeyA");
-            await this.page.keyboard.up("Control");
-            await this.page.keyboard.press("Backspace");
-            await new Promise((resolve) => setTimeout(resolve, 100));
-
-            // Transform text trước khi gửi
-            const transformedContent = await transformText(msg.content);
-            const contentToSend = transformedContent || msg.content;
-
-            // Xử lý tin nhắn nhiều dòng
-            if (contentToSend.includes("\n")) {
-              const lines = contentToSend.split("\n");
-              for (let j = 0; j < lines.length; j++) {
-                if (lines[j]) {
-                  await richInput.type(lines[j], { delay: 5 });
-                }
-                if (j < lines.length - 1) {
-                  await this.page.keyboard.down("Shift");
-                  await this.page.keyboard.press("Enter");
-                  await this.page.keyboard.up("Shift");
-                  await new Promise((resolve) => setTimeout(resolve, 30));
-                }
-              }
-            } else {
-              await richInput.type(contentToSend, { delay: 5 });
-            }
-
-            await new Promise((resolve) => setTimeout(resolve, 200));
-            await this.page.keyboard.press("Enter");
-            await new Promise((resolve) => setTimeout(resolve, 800));
-          } else if (msg.type === "images") {
-            // GỬI NHIỀU ẢNH (ALBUM) BẰNG DRAG & DROP
-            this.emit(
-              "log",
-              `  ${i + 1}/${messagesToSend.length}. Gửi ${msg.count} ảnh cùng lúc`,
-            );
-
-            try {
-              // Verify tất cả files tồn tại
-              const validPaths = [];
-              for (const fp of msg.filePaths) {
-                const absolutePath = path.resolve(fp);
-                if (fs.existsSync(absolutePath)) {
-                  validPaths.push(absolutePath);
-                } else {
-                  this.emit(
-                    "error",
-                    `     ❌ File không tồn tại: ${absolutePath}`,
-                  );
-                }
-              }
-
-              if (validPaths.length === 0) {
-                this.emit("error", `     ❌ Không có file nào hợp lệ`);
-                continue;
-              }
-
-              this.emit("log", `     📂 Sẽ upload ${validPaths.length} ảnh`);
-
-              // Đọc tất cả files thành base64
-              const filesData = validPaths.map((fp) => {
-                const fileBuffer = fs.readFileSync(fp);
-                return {
-                  name: path.basename(fp),
-                  base64: fileBuffer.toString("base64"),
-                  mimeType: "image/jpeg",
-                };
-              });
-
-              this.emit("log", `     🎯 Tìm vùng drop...`);
-
-              // Tìm element để drop
-              const dropSelectors = [
-                ".dragOverlayInputbox",
-                "#richInput",
-                '[data-id="richInput"]',
-                ".chat-input",
-                ".input-area",
-              ];
-
-              let dropTarget = null;
-              let usedSelector = "";
-              for (const selector of dropSelectors) {
-                dropTarget = await this.page.$(selector);
-                if (dropTarget) {
-                  usedSelector = selector;
-                  this.emit("log", `     ✓ Tìm thấy drop zone: ${selector}`);
-                  break;
-                }
-              }
-
-              if (!dropTarget) {
-                this.emit("error", `     ❌ Không tìm thấy vùng drop`);
-                continue;
-              }
-
-              this.emit(
-                "log",
-                `     🖱️ Simulate drag & drop ${filesData.length} files...`,
-              );
-
-              // Simulate drag and drop với NHIỀU files
-              await this.page.evaluate(
-                async (selector, filesData) => {
-                  const element = document.querySelector(selector);
-                  if (!element) {
-                    throw new Error(`Element ${selector} not found`);
-                  }
-
-                  // Tạo DataTransfer với NHIỀU files
-                  const dataTransfer = new DataTransfer();
-
-                  for (const fileData of filesData) {
-                    // Convert base64 to blob
-                    const byteCharacters = atob(fileData.base64);
-                    const byteNumbers = new Array(byteCharacters.length);
-                    for (let i = 0; i < byteCharacters.length; i++) {
-                      byteNumbers[i] = byteCharacters.charCodeAt(i);
-                    }
-                    const byteArray = new Uint8Array(byteNumbers);
-                    const blob = new Blob([byteArray], {
-                      type: fileData.mimeType,
-                    });
-
-                    // Tạo File object và add vào DataTransfer
-                    const file = new File([blob], fileData.name, {
-                      type: fileData.mimeType,
-                    });
-                    dataTransfer.items.add(file);
-                  }
-
-                  // Dispatch drag events
-                  const dragenterEvent = new DragEvent("dragenter", {
-                    bubbles: true,
-                    cancelable: true,
-                    dataTransfer: dataTransfer,
-                  });
-                  element.dispatchEvent(dragenterEvent);
-
-                  const dragoverEvent = new DragEvent("dragover", {
-                    bubbles: true,
-                    cancelable: true,
-                    dataTransfer: dataTransfer,
-                  });
-                  element.dispatchEvent(dragoverEvent);
-
-                  // Dispatch drop event
-                  const dropEvent = new DragEvent("drop", {
-                    bubbles: true,
-                    cancelable: true,
-                    dataTransfer: dataTransfer,
-                  });
-                  element.dispatchEvent(dropEvent);
-
-                  return `Dropped ${filesData.length} files`;
-                },
-                usedSelector,
-                filesData,
-              );
-
-              this.emit("log", `     ⏳ Chờ xử lý...`);
-              await new Promise((resolve) => setTimeout(resolve, 3000));
-
-              // Tìm và click nút Send
-              this.emit("log", `     ✉️ Tìm nút gửi...`);
-              const sendButtons = [
-                'button[data-translate-inner="STR_SEND"]',
-                "button.btn-send",
-                'button[title*="Gửi"]',
-                'button[aria-label*="Send"]',
-                ".btn-send-photo",
-              ];
-
-              let sendClicked = false;
-              for (const selector of sendButtons) {
-                try {
-                  const sendBtn = await this.page.$(selector);
-                  if (sendBtn) {
-                    this.emit("log", `     ✓ Click nút: ${selector}`);
-                    await sendBtn.click();
-                    sendClicked = true;
-                    break;
-                  }
-                } catch (e) {
-                  // Bỏ qua
-                }
-              }
-
-              if (!sendClicked) {
-                this.emit("log", `     ⌨️ Gửi bằng Enter...`);
-                await this.page.keyboard.press("Enter");
-              }
-
-              await new Promise((resolve) => setTimeout(resolve, 2000));
-              this.emit("log", `     ✅ Đã gửi ${msg.count} ảnh`);
-
-              // Xóa các file ảnh đã gửi
-              for (const fp of validPaths) {
-                try {
-                  fs.unlinkSync(fp);
-                  this.emit("log", `     🗑️ Đã xóa: ${path.basename(fp)}`);
-                } catch (delError) {
-                  this.emit(
-                    "error",
-                    `     ⚠️ Không xóa được: ${path.basename(fp)}`,
-                  );
-                }
-              }
-            } catch (uploadError) {
-              this.emit(
-                "error",
-                `     ❌ Lỗi khi gửi nhiều ảnh: ${uploadError.message}`,
-              );
-            }
-          } else if (msg.type === "images_with_text") {
-            // GỬI NHIỀU ẢNH + TEXT - ĐÂY LÀ 1 TIN NHẮN DUY NHẤT
-            this.emit(
-              "log",
-              `  ${i + 1}/${messagesToSend.length}. Gửi 1 tin nhắn (${msg.count} ảnh + caption)`,
-            );
-            this.emit(
-              "log",
-              `     💬 Caption: "${msg.caption.substring(0, 50)}${msg.caption.length > 50 ? "..." : ""}"`,
-            );
-
-            try {
-              // Verify tất cả files tồn tại
-              const validPaths = [];
-              for (const fp of msg.filePaths) {
-                const absolutePath = path.resolve(fp);
-                if (fs.existsSync(absolutePath)) {
-                  validPaths.push(absolutePath);
-                } else {
-                  this.emit(
-                    "error",
-                    `     ❌ File không tồn tại: ${absolutePath}`,
-                  );
-                }
-              }
-
-              if (validPaths.length === 0) {
-                this.emit("error", `     ❌ Không có file nào hợp lệ`);
-                continue;
-              }
-
-              this.emit(
-                "log",
-                `     🎬 BƯỚC 1: Kéo ${validPaths.length} ảnh vào chat...`,
-              );
-
-              // Đọc tất cả files thành base64
-              const filesData = validPaths.map((fp) => {
-                const fileBuffer = fs.readFileSync(fp);
-                return {
-                  name: path.basename(fp),
-                  base64: fileBuffer.toString("base64"),
-                  mimeType: "image/jpeg",
-                };
-              });
-
-              // Tìm element để drop
-              const dropSelectors = [
-                ".dragOverlayInputbox",
-                "#richInput",
-                '[data-id="richInput"]',
-                ".chat-input",
-                ".input-area",
-              ];
-
-              let dropTarget = null;
-              let usedSelector = "";
-              for (const selector of dropSelectors) {
-                dropTarget = await this.page.$(selector);
-                if (dropTarget) {
-                  usedSelector = selector;
-                  this.emit("log", `     ✓ Tìm thấy drop zone: ${selector}`);
-                  break;
-                }
-              }
-
-              if (!dropTarget) {
-                this.emit("error", `     ❌ Không tìm thấy vùng drop`);
-                continue;
-              }
-
-              this.emit(
-                "log",
-                `     🖱️ Drag & drop ${filesData.length} files...`,
-              );
-
-              // Simulate drag and drop với NHIỀU files
-              await this.page.evaluate(
-                async (selector, filesData) => {
-                  const element = document.querySelector(selector);
-                  if (!element) {
-                    throw new Error(`Element ${selector} not found`);
-                  }
-
-                  const dataTransfer = new DataTransfer();
-
-                  for (const fileData of filesData) {
-                    const byteCharacters = atob(fileData.base64);
-                    const byteNumbers = new Array(byteCharacters.length);
-                    for (let i = 0; i < byteCharacters.length; i++) {
-                      byteNumbers[i] = byteCharacters.charCodeAt(i);
-                    }
-                    const byteArray = new Uint8Array(byteNumbers);
-                    const blob = new Blob([byteArray], {
-                      type: fileData.mimeType,
-                    });
-                    const file = new File([blob], fileData.name, {
-                      type: fileData.mimeType,
-                    });
-                    dataTransfer.items.add(file);
-                  }
-
-                  element.dispatchEvent(
-                    new DragEvent("dragenter", {
-                      bubbles: true,
-                      cancelable: true,
-                      dataTransfer,
-                    }),
-                  );
-                  element.dispatchEvent(
-                    new DragEvent("dragover", {
-                      bubbles: true,
-                      cancelable: true,
-                      dataTransfer,
-                    }),
-                  );
-                  element.dispatchEvent(
-                    new DragEvent("drop", {
-                      bubbles: true,
-                      cancelable: true,
-                      dataTransfer,
-                    }),
-                  );
-
-                  return `Dropped ${filesData.length} files`;
-                },
-                usedSelector,
-                filesData,
-              );
-
-              this.emit("log", `     ⏳ Chờ preview load...`);
-              await new Promise((resolve) => setTimeout(resolve, 2500));
-
-              // Type caption text
-              this.emit("log", `     🎬 BƯỚC 2: Typing caption...`);
-              this.emit(
-                "log",
-                `        "${msg.caption.substring(0, 60)}${msg.caption.length > 60 ? "..." : ""}"`,
-              );
-              const richInput = await this.page.$("#richInput");
-              if (richInput) {
-                await richInput.click();
-                await new Promise((resolve) => setTimeout(resolve, 200));
-
-                // Transform caption trước khi gửi
-                const transformedCaption = await transformText(msg.caption);
-                const captionToSend = transformedCaption || msg.caption;
-
-                // Type caption (hỗ trợ nhiều dòng)
-                if (captionToSend.includes("\n")) {
-                  const lines = captionToSend.split("\n");
-                  for (let j = 0; j < lines.length; j++) {
-                    if (lines[j]) {
-                      await richInput.type(lines[j], { delay: 5 });
-                    }
-                    if (j < lines.length - 1) {
-                      await this.page.keyboard.down("Shift");
-                      await this.page.keyboard.press("Enter");
-                      await this.page.keyboard.up("Shift");
-                      await new Promise((resolve) => setTimeout(resolve, 30));
-                    }
-                  }
-                } else {
-                  await richInput.type(captionToSend, { delay: 5 });
-                }
-              }
-
-              await new Promise((resolve) => setTimeout(resolve, 500));
-
-              // Gửi tin nhắn
-              this.emit("log", `     🎬 BƯỚC 3: Send 1 tin nhắn hoàn chỉnh...`);
-              await this.page.keyboard.press("Enter");
-              await new Promise((resolve) => setTimeout(resolve, 2000));
-              this.emit(
-                "log",
-                `     ✅ Đã gửi 1 tin nhắn (${msg.count} ảnh + caption)`,
-              );
-
-              // Xóa các file ảnh đã gửi
-              for (const fp of validPaths) {
-                try {
-                  fs.unlinkSync(fp);
-                  this.emit("log", `     🗑️ Đã xóa: ${path.basename(fp)}`);
-                } catch (delError) {
-                  this.emit(
-                    "error",
-                    `     ⚠️ Không xóa được: ${path.basename(fp)}`,
-                  );
-                }
-              }
-            } catch (uploadError) {
-              this.emit("error", `     ❌ Lỗi: ${uploadError.message}`);
-            }
-          } else if (msg.type === "image_with_text") {
-            // GỬI 1 ẢNH + TEXT - ĐÂY LÀ 1 TIN NHẮN DUY NHẤT
-            this.emit(
-              "log",
-              `  ${i + 1}/${messagesToSend.length}. Gửi 1 tin nhắn (1 ảnh + caption)`,
-            );
-            this.emit(
-              "log",
-              `     💬 Caption: "${msg.caption.substring(0, 50)}${msg.caption.length > 50 ? "..." : ""}"`,
-            );
-
-            try {
-              const absolutePath = path.resolve(msg.filePath);
-              if (!fs.existsSync(absolutePath)) {
-                this.emit(
-                  "error",
-                  `     ❌ File không tồn tại: ${absolutePath}`,
-                );
-                continue;
-              }
-
-              // Đọc file thành base64
-              const fileBuffer = fs.readFileSync(absolutePath);
-              const base64Data = fileBuffer.toString("base64");
-              const mimeType = "image/jpeg";
-
-              // Tìm element để drop
-              const dropSelectors = [
-                ".dragOverlayInputbox",
-                "#richInput",
-                '[data-id="richInput"]',
-                ".chat-input",
-                ".input-area",
-              ];
-
-              let dropTarget = null;
-              let usedSelector = "";
-              for (const selector of dropSelectors) {
-                dropTarget = await this.page.$(selector);
-                if (dropTarget) {
-                  usedSelector = selector;
-                  break;
-                }
-              }
-
-              if (!dropTarget) {
-                this.emit("error", `     ❌ Không tìm thấy vùng drop`);
-                continue;
-              }
-
-              this.emit("log", `     🎬 BƯỚC 1: Kéo ảnh vào chat...`);
-
-              // Simulate drag and drop với file
-              await this.page.evaluate(
-                async (selector, fileName, base64, mimeType) => {
-                  const byteCharacters = atob(base64);
-                  const byteNumbers = new Array(byteCharacters.length);
-                  for (let i = 0; i < byteCharacters.length; i++) {
-                    byteNumbers[i] = byteCharacters.charCodeAt(i);
-                  }
-                  const byteArray = new Uint8Array(byteNumbers);
-                  const blob = new Blob([byteArray], { type: mimeType });
-                  const file = new File([blob], fileName, { type: mimeType });
-
-                  const element = document.querySelector(selector);
-                  if (!element) {
-                    throw new Error(`Element ${selector} not found`);
-                  }
-
-                  const dataTransfer = new DataTransfer();
-                  dataTransfer.items.add(file);
-
-                  element.dispatchEvent(
-                    new DragEvent("dragenter", {
-                      bubbles: true,
-                      cancelable: true,
-                      dataTransfer,
-                    }),
-                  );
-                  element.dispatchEvent(
-                    new DragEvent("dragover", {
-                      bubbles: true,
-                      cancelable: true,
-                      dataTransfer,
-                    }),
-                  );
-                  element.dispatchEvent(
-                    new DragEvent("drop", {
-                      bubbles: true,
-                      cancelable: true,
-                      dataTransfer,
-                    }),
-                  );
-
-                  return "Drop event dispatched";
-                },
-                usedSelector,
-                path.basename(msg.filePath),
-                base64Data,
-                mimeType,
-              );
-
-              this.emit("log", `     ⏳ Chờ preview load...`);
-              await new Promise((resolve) => setTimeout(resolve, 2500));
-
-              // Type caption text
-              this.emit("log", `     🎬 BƯỚC 2: Typing caption...`);
-              this.emit(
-                "log",
-                `        "${msg.caption.substring(0, 60)}${msg.caption.length > 60 ? "..." : ""}"`,
-              );
-              const richInput = await this.page.$("#richInput");
-              if (richInput) {
-                await richInput.click();
-                await new Promise((resolve) => setTimeout(resolve, 200));
-
-                // Transform caption trước khi gửi
-                const transformedCaption = await transformText(msg.caption);
-                const captionToSend = transformedCaption || msg.caption;
-
-                // Type caption (hỗ trợ nhiều dòng)
-                if (captionToSend.includes("\n")) {
-                  const lines = captionToSend.split("\n");
-                  for (let j = 0; j < lines.length; j++) {
-                    if (lines[j]) {
-                      await richInput.type(lines[j], { delay: 5 });
-                    }
-                    if (j < lines.length - 1) {
-                      await this.page.keyboard.down("Shift");
-                      await this.page.keyboard.press("Enter");
-                      await this.page.keyboard.up("Shift");
-                      await new Promise((resolve) => setTimeout(resolve, 30));
-                    }
-                  }
-                } else {
-                  await richInput.type(captionToSend, { delay: 5 });
-                }
-              }
-
-              await new Promise((resolve) => setTimeout(resolve, 500));
-
-              // Gửi tin nhắn
-              this.emit("log", `     🎬 BƯỚC 3: Send 1 tin nhắn hoàn chỉnh...`);
-              await this.page.keyboard.press("Enter");
-              await new Promise((resolve) => setTimeout(resolve, 2000));
-              this.emit("log", `     ✅ Đã gửi 1 tin nhắn (1 ảnh + caption)`);
-
-              // Xóa file ảnh đã gửi
-              try {
-                fs.unlinkSync(absolutePath);
-                this.emit(
-                  "log",
-                  `     🗑️ Đã xóa: ${path.basename(absolutePath)}`,
-                );
-              } catch (delError) {
-                this.emit(
-                  "error",
-                  `     ⚠️ Không xóa được file: ${delError.message}`,
-                );
-              }
-            } catch (uploadError) {
-              this.emit("error", `     ❌ Lỗi: ${uploadError.message}`);
-            }
-          } else if (msg.type === "image") {
-            // GỬI 1 ẢNH BẰNG DRAG & DROP
-            this.emit(
-              "log",
-              `  ${i + 1}/${messagesToSend.length}. Gửi ảnh: ${path.basename(msg.filePath)}`,
-            );
-
-            try {
-              // Verify file tồn tại trước khi upload
-              const absolutePath = path.resolve(msg.filePath);
-              if (!fs.existsSync(absolutePath)) {
-                this.emit(
-                  "error",
-                  `     ❌ File không tồn tại: ${absolutePath}`,
-                );
-                continue;
-              }
-              this.emit("log", `     📂 Đọc file từ: ${absolutePath}`);
-
-              // Đọc file thành base64
-              const fileBuffer = fs.readFileSync(absolutePath);
-              const base64Data = fileBuffer.toString("base64");
-              const mimeType = "image/jpeg"; // Có thể detect từ extension
-
-              this.emit("log", `     🎯 Tìm vùng drop...`);
-
-              // Tìm element để drop - thử nhiều selector
-              const dropSelectors = [
-                ".dragOverlayInputbox",
-                "#richInput",
-                '[data-id="richInput"]',
-                ".chat-input",
-                ".input-area",
-              ];
-
-              let dropTarget = null;
-              let usedSelector = "";
-              for (const selector of dropSelectors) {
-                dropTarget = await this.page.$(selector);
-                if (dropTarget) {
-                  usedSelector = selector;
-                  this.emit("log", `     ✓ Tìm thấy drop zone: ${selector}`);
-                  break;
-                }
-              }
-
-              if (!dropTarget) {
-                this.emit("error", `     ❌ Không tìm thấy vùng drop`);
-                continue;
-              }
-
-              this.emit("log", `     🖱️ Simulate drag & drop...`);
-
-              // Simulate drag and drop với file
-              await this.page.evaluate(
-                async (selector, fileName, base64, mimeType) => {
-                  // Convert base64 to blob
-                  const byteCharacters = atob(base64);
-                  const byteNumbers = new Array(byteCharacters.length);
-                  for (let i = 0; i < byteCharacters.length; i++) {
-                    byteNumbers[i] = byteCharacters.charCodeAt(i);
-                  }
-                  const byteArray = new Uint8Array(byteNumbers);
-                  const blob = new Blob([byteArray], { type: mimeType });
-
-                  // Tạo File object
-                  const file = new File([blob], fileName, { type: mimeType });
-
-                  // Tìm element
-                  const element = document.querySelector(selector);
-                  if (!element) {
-                    throw new Error(`Element ${selector} not found`);
-                  }
-
-                  // Tạo DataTransfer
-                  const dataTransfer = new DataTransfer();
-                  dataTransfer.items.add(file);
-
-                  // Dispatch drag events
-                  const dragenterEvent = new DragEvent("dragenter", {
-                    bubbles: true,
-                    cancelable: true,
-                    dataTransfer: dataTransfer,
-                  });
-                  element.dispatchEvent(dragenterEvent);
-
-                  const dragoverEvent = new DragEvent("dragover", {
-                    bubbles: true,
-                    cancelable: true,
-                    dataTransfer: dataTransfer,
-                  });
-                  element.dispatchEvent(dragoverEvent);
-
-                  // Dispatch drop event
-                  const dropEvent = new DragEvent("drop", {
-                    bubbles: true,
-                    cancelable: true,
-                    dataTransfer: dataTransfer,
-                  });
-                  element.dispatchEvent(dropEvent);
-
-                  return "Drop event dispatched";
-                },
-                usedSelector,
-                path.basename(msg.filePath),
-                base64Data,
-                mimeType,
-              );
-
-              this.emit("log", `     ⏳ Chờ xử lý...`);
-              await new Promise((resolve) => setTimeout(resolve, 2500));
-
-              // Tìm và click nút Send
-              this.emit("log", `     ✉️ Tìm nút gửi...`);
-              const sendButtons = [
-                'button[data-translate-inner="STR_SEND"]',
-                "button.btn-send",
-                'button[title*="Gửi"]',
-                'button[aria-label*="Send"]',
-                ".btn-send-photo",
-              ];
-
-              let sendClicked = false;
-              for (const selector of sendButtons) {
-                try {
-                  const sendBtn = await this.page.$(selector);
-                  if (sendBtn) {
-                    this.emit("log", `     ✓ Click nút: ${selector}`);
-                    await sendBtn.click();
-                    sendClicked = true;
-                    break;
-                  }
-                } catch (e) {
-                  // Bỏ qua
-                }
-              }
-
-              // Nếu không tìm thấy nút, thử Enter
-              if (!sendClicked) {
-                this.emit("log", `     ⌨️ Gửi bằng Enter...`);
-                await this.page.keyboard.press("Enter");
-              }
-
-              await new Promise((resolve) => setTimeout(resolve, 1500));
-              this.emit("log", `     ✅ Đã gửi ảnh`);
-
-              // Xóa file ảnh đã gửi
-              try {
-                fs.unlinkSync(absolutePath);
-                this.emit(
-                  "log",
-                  `     🗑️ Đã xóa: ${path.basename(absolutePath)}`,
-                );
-              } catch (delError) {
-                this.emit(
-                  "error",
-                  `     ⚠️ Không xóa được file: ${delError.message}`,
-                );
-              }
-            } catch (uploadError) {
-              this.emit(
-                "error",
-                `     ❌ Lỗi khi gửi ảnh: ${uploadError.message}`,
-              );
-            }
-          }
-        } catch (error) {
-          this.emit("error", `Lỗi gửi tin ${i + 1}: ${error.message}`);
-        }
+      return await fn();
+    } finally {
+      resolve();
+    }
+  }
+
+  async appendMessage(message) {
+    await this._withQueueLock(() => {
+      this.messageQueue.push({
+        ...message,
+        createdAt: message.createdAt || Date.now(),
+        retryCount: 0,
+      });
+      this._flushQueueToDisk();
+    });
+  }
+
+  // ─── STATE helpers ────────────────────────────────────────────────────────
+
+  loadState() {
+    try {
+      if (fs.existsSync(STATE_FILE)) {
+        return JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
       }
-
-      this.emit(
-        "log",
-        `\n✅ Đã gửi xong ${messagesToSend.length} tin nhắn đến "${this.targetGroup}"`,
-      );
-
-      // BƯỚC 3: QUAY VỀ NHÓM NGUỒN
-      this.emit("log", `\n[BƯỚC 3/3] Quay về nhóm nguồn...`);
-      await this.navigateBackToSource();
-    } catch (error) {
-      this.emit("error", `❌ Lỗi khi gửi batch: ${error.message}`);
-      // Cố gắng quay lại nhóm nguồn
-      await this.navigateBackToSource();
-    }
+    } catch { /* ignore */ }
+    return {};
   }
 
-  // Navigate về nhóm nguồn
-  async navigateBackToSource() {
-    try {
-      this.emit("log", `🔙 Tìm nhóm nguồn: "${this.sourceGroup}"...`);
-
-      // GIỐNG CODE TÌM NHÓM NGUỒN
-      await this.page.type("#contact-search-input", this.sourceGroup);
-      await new Promise((resolve) => setTimeout(resolve, 1500));
-      await this.page.keyboard.press("Enter");
-      await new Promise((resolve) => setTimeout(resolve, 2500));
-
-      const searchInput = await this.page.$("#contact-search-input");
-      await searchInput.click({ clickCount: 3 });
-      await this.page.keyboard.press("Backspace");
-      await new Promise((resolve) => setTimeout(resolve, 500));
-
-      this.emit("log", `✅ Đã về nhóm nguồn: "${this.sourceGroup}"`);
-      this.emit("log", `🔄 Tiếp tục quét tin nhắn tại nhóm nguồn...`);
-      this.emit("log", `========== KẾT THÚC GỮI TIN NHẮN ==========\n`);
-
-      // KHỞI ĐỘNG LẠI quét tin nhắn
-      this.startScanning();
-      this.emit(
-        "log",
-        `▶️ Đã khởi động lại quét tin nhắn (mỗi ${this.checkInterval}ms)\n`,
-      );
-    } catch (error) {
-      this.emit("error", `Lỗi khi về nhóm nguồn: ${error.message}`);
-    }
+  saveState(state) {
+    fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), "utf8");
   }
+
+  // ─── START ──────────────────────────────────────────────────────────────────
 
   async start() {
     try {
-      // Debug: Log config
-      this.emit(
-        "log",
-        `📋 Config - Nhóm nguồn: "${this.sourceGroup}", Nhóm đích: "${this.targetGroup}"`,
-      );
-
-      const hasSession = fs.existsSync(path.join(this.sessionPath, "Default"));
+      const hasSession = fs.existsSync(path.join(SESSION_PATH, "Default"));
 
       this.emit(
         "status",
         hasSession
-          ? "Đang khởi động ở chế độ ẩn..."
-          : "Đang khởi động... (Cần quét QR)",
+          ? "Dang khoi dong..."
+          : "Dang khoi dong... (Can quet QR)",
       );
 
-      // Launch với UI nếu chưa có session, ẩn nếu đã có session
       this.browser = await puppeteer.launch({
-        headless: hasSession, // Chỉ ẩn khi đã có session
-        userDataDir: this.sessionPath,
+        headless: hasSession,
+        userDataDir: SESSION_PATH,
+        ...(this.chromePath ? { executablePath: this.chromePath } : {}),
         args: [
           "--start-maximized",
           "--no-sandbox",
@@ -1024,49 +135,25 @@ class Bot extends EventEmitter {
         defaultViewport: hasSession ? { width: 1366, height: 768 } : null,
       });
 
-      // Đóng tất cả tab hiện tại và tạo tab mới
-      const pages = await this.browser.pages();
-      this.emit(
-        "log",
-        `🗑️ Tìm thấy ${pages.length} tab, đang đóng các tab cũ...`,
-      );
-
-      // Đóng tất cả tab trừ tab đầu tiên
-      for (let i = 1; i < pages.length; i++) {
-        await pages[i].close();
-      }
-
-      // Sử dụng tab đầu tiên hoặc tạo mới nếu không có
-      if (pages.length > 0) {
-        this.page = pages[0];
-      } else {
-        this.page = await this.browser.newPage();
-      }
-
-      this.emit("log", `✓ Chỉ giữ lại 1 tab`);
-
+      this.page = (await this.browser.pages())[0] || (await this.browser.newPage());
       await this.page.setViewport({ width: 1366, height: 768 });
-      await this.page.goto("https://chat.zalo.me/", {
-        waitUntil: "networkidle2",
-      });
+      await this._gotoZalo(this.page);
 
       if (!hasSession) {
-        this.emit("status", "⏳ Vui lòng quét QR code để đăng nhập...");
+        this.emit("status", "Vui long quet QR code de dang nhap...");
       }
 
       await this.page.waitForSelector("#contact-search-input", { timeout: 0 });
-      this.emit("status", "✅ Đã đăng nhập thành công");
 
-      // Nếu là lần đầu login, restart ở chế độ ẩn
       if (!hasSession) {
-        this.emit("log", "🔄 Đang khởi động lại ở chế độ ẩn...");
+        this.emit("log", "Dang nhap thanh cong, dang khoi dong lai...");
         await this.browser.close();
-        await new Promise((resolve) => setTimeout(resolve, 2000));
+        await new Promise((r) => setTimeout(r, 2000));
 
-        // Launch lại với headless
         this.browser = await puppeteer.launch({
-          headless: true,
-          userDataDir: this.sessionPath,
+          headless: false,
+          userDataDir: SESSION_PATH,
+          ...(this.chromePath ? { executablePath: this.chromePath } : {}),
           args: [
             "--no-sandbox",
             "--disable-setuid-sandbox",
@@ -1075,520 +162,721 @@ class Bot extends EventEmitter {
             "--disable-gpu",
             "--disable-blink-features=AutomationControlled",
           ],
+          defaultViewport: { width: 1366, height: 768 },
         });
-
-        this.page = await this.browser.newPage();
+        this.page = (await this.browser.pages())[0] || (await this.browser.newPage());
         await this.page.setViewport({ width: 1366, height: 768 });
-        await this.page.goto("https://chat.zalo.me/", {
-          waitUntil: "networkidle2",
-        });
-        await this.page.waitForSelector("#contact-search-input", {
-          timeout: 10000,
-        });
-        this.emit("status", "✅ Đã chuyển sang chế độ ẩn");
-
-        // Setup console listener cho page mới
-        this.page.on("console", (msg) => {
-          const text = msg.text();
-          if (text.includes("[IMAGE DETECTED]") || text.includes("[DEBUG]")) {
-            this.emit("log", `🔍 Browser: ${text}`);
-          }
-        });
+        await this._gotoZalo(this.page);
+        await this._waitForZaloReady(this.page);
       }
 
-      this.emit("log", "Đang tìm nhóm nguồn...");
-
-      await this.page.type("#contact-search-input", this.sourceGroup);
-      await new Promise((resolve) => setTimeout(resolve, 1500));
-      await this.page.keyboard.press("Enter");
-      await new Promise((resolve) => setTimeout(resolve, 2500));
-
-      const searchInput = await this.page.$("#contact-search-input");
-      await searchInput.click({ clickCount: 3 });
-      await this.page.keyboard.press("Backspace");
-      await new Promise((resolve) => setTimeout(resolve, 500));
-
-      this.emit("status", `✅ Đã vào nhóm "${this.sourceGroup}"`);
-
-      // Hiển thị tin nhắn cuối đã lưu nếu có
-      if (this.lastMessage) {
-        this.emit("log", `ℹ️ Tin nhắn cuối đã forward: "${this.lastMessage}"`);
-        this.emit(
-          "log",
-          "📍 Bot sẽ bỏ qua tin nhắn này nếu vẫn còn là tin mới nhất\n",
-        );
+      // Dong tat ca tab thua, chi giu 1 tab duy nhat
+      const allPages = await this.browser.pages();
+      for (const p of allPages) {
+        if (p !== this.page) await p.close();
       }
 
-      this.emit("log", "Bắt đầu quét tin nhắn...\n");
+      // Xoa queue cu — chi forward tin nhan tu luc start
+      this.messageQueue = [];
+      this._flushQueueToDisk();
 
-      // Bắt console.log từ browser để debug
-      this.page.on("console", (msg) => {
-        const text = msg.text();
-        if (text.includes("[IMAGE DETECTED]") || text.includes("[DEBUG]")) {
-          this.emit("log", `🔍 Browser: ${text}`);
-        }
+      this.browser.on("disconnected", () => {
+        this.emit("error", "Browser da dong bat ngo");
+        this.running = false;
       });
 
-      this.startScanning();
+      this.running = true;
+      this.emit("status", "Bot dang chay");
+      this.emit(
+        "log",
+        `1 tab: lang nghe ${this.sourceGroups.length} nhom, forward moi ${this.forwardInterval / 1000}s`,
+      );
+
+      // Bat dau vong lap chinh
+      await this._mainLoop();
     } catch (error) {
       if (error.message && error.message.includes("Could not find Chrome")) {
         this.emit(
           "error",
-          `❌ Không tìm thấy Chrome/Chromium cho Puppeteer.\n` +
-            `Vui lòng cài đặt Chrome hoặc chạy lệnh:\n` +
-            `    npx puppeteer browsers install chrome\n` +
-            `Hoặc xem hướng dẫn tại: https://pptr.dev/guides/configuration`,
+          "Khong tim thay Chrome.\nChay: npx puppeteer browsers install chrome",
         );
       } else {
-        this.emit("error", `Lỗi khởi động: ${error.message}`);
+        this.emit("error", `Loi khoi dong: ${error.message}`);
       }
       this.stop();
     }
   }
 
-  startScanning() {
-    this.intervalId = setInterval(async () => {
-      try {
-        this.scanCount++;
-        this.emit(
-          "log",
-          `🔍 Quét lần #${this.scanCount} - ${new Date().toLocaleTimeString()}`,
-        );
+  // ─── MAIN LOOP ────────────────────────────────────────────────────────────
+  //  Vong lap: quet tung nhom nguon → khi den han forward → vao nhom dich gui
+  //  → quay lai quet tiep
 
-        const currentMsg = await this.page.evaluate(() => {
-          // Tìm cả message-frame VÀ message-non-frame
-          const frames = document.querySelectorAll(
-            '[id^="message-frame_"], .message-frame, .message-non-frame',
-          );
-          console.log(`[DEBUG] Found ${frames.length} message frames`);
+  async _mainLoop() {
+    let lastForwardTime = Date.now();
 
-          for (let i = frames.length - 1; i >= 0; i--) {
-            // TẠM THỜI quét TẤT CẢ tin nhắn (kể cả của mình) để test
-            // Sau khi test xong, đổi lại: if (!frames[i].classList.contains("me"))
-            const skipMyMessages = false; // true = chỉ quét tin người khác, false = quét tất cả
-            const isMe = frames[i].classList.contains("me");
+    while (this.running) {
+      // ── Phase 1: Lang nghe - quet tung nhom nguon ──
+      for (let i = 0; i < this.sourceGroups.length; i++) {
+        if (!this.running) break;
+        const groupName = this.sourceGroups[i];
 
-            if (!skipMyMessages || !isMe) {
-              // KIỂM TRA ẢNH - Chỉ lấy ảnh thật, bỏ qua ảnh preview của link
-              let imgElements = [];
-
-              // Tìm ảnh trong các container ảnh thật
-              const imageContainers = frames[i].querySelectorAll(
-                '.chatImageMessage--audit, .img-msg-v2.photo-message-v2, .album, [id^="album-container"]',
-              );
-
-              if (imageContainers.length > 0) {
-                // Lấy tất cả ảnh blob từ các container ảnh thật
-                imageContainers.forEach((container) => {
-                  const imgs = container.querySelectorAll('img[src^="blob:"]');
-                  imgs.forEach((img) => {
-                    // Đảm bảo không nằm trong link-message
-                    if (!img.closest(".link-message")) {
-                      imgElements.push(img);
-                    }
-                  });
-                });
-
-                if (imgElements.length > 0) {
-                  console.log(
-                    `[IMAGE DETECTED] Found ${imgElements.length} real images (excluded link previews)`,
-                  );
-                }
-              }
-
-              // Fallback: tìm tất cả ảnh blob KHÔNG nằm trong link-message
-              if (imgElements.length === 0) {
-                const allImages =
-                  frames[i].querySelectorAll('img[src^="blob:"]');
-                allImages.forEach((img) => {
-                  // Chỉ lấy ảnh KHÔNG nằm trong link-message
-                  if (!img.closest(".link-message")) {
-                    imgElements.push(img);
-                  }
-                });
-
-                if (imgElements.length > 0) {
-                  console.log(
-                    `[IMAGE DETECTED] Found ${imgElements.length} images (fallback, excluded link previews)`,
-                  );
-                }
-              }
-
-              // LẤY TEXT (bất kể có ảnh hay không)
-              let text = "";
-
-              // Tìm container message-text-content (chứa TOÀN BỘ tin nhắn dài)
-              const textContainer = frames[i].querySelector(
-                '[data-component="message-text-content"]',
-              );
-              if (textContainer) {
-                text =
-                  textContainer.innerText || textContainer.textContent || "";
-              }
-
-              // Nếu không có, thử lấy từ caption trong ảnh
-              if (!text || text.trim() === "") {
-                const imgCaption = frames[i].querySelector(
-                  '.img-msg-v2__cap [data-component="message-text-content"]',
-                );
-                if (imgCaption) {
-                  text = imgCaption.innerText || imgCaption.textContent || "";
-                  console.log(
-                    `[TEXT DETECTED] Found caption in image: ${text.substring(0, 50)}...`,
-                  );
-                }
-              }
-
-              // Fallback: thử lấy từ text-message__container
-              if (!text || text.trim() === "") {
-                const msgContainer = frames[i].querySelector(
-                  ".text-message__container",
-                );
-                if (msgContainer) {
-                  text =
-                    msgContainer.innerText || msgContainer.textContent || "";
-                }
-              }
-
-              // Fallback: lấy từ span.text (tin nhắn ngắn)
-              if (!text || text.trim() === "") {
-                const textSpan = frames[i].querySelector("span.text");
-                if (textSpan) {
-                  text = textSpan.innerText;
-
-                  if (!text || text.trim() === "") {
-                    let html = textSpan.innerHTML;
-                    html = html.replace(/<br\s*\/?>/gi, "\n");
-                    html = html.replace(/<\/(div|p)>/gi, "\n");
-                    html = html.replace(/<[^>]*>/g, "");
-                    const txt = document.createElement("textarea");
-                    txt.innerHTML = html;
-                    text = txt.value;
-                  }
-                }
-              }
-
-              text = text.trim();
-
-              // Nếu có ẢNH
-              if (imgElements.length > 0) {
-                console.log(
-                  `[IMAGE DETECTED] Total: ${imgElements.length} image(s)`,
-                );
-                console.log(
-                  `[IMAGE DETECTED] Frame index: ${i}/${frames.length - 1}`,
-                );
-
-                const images = imgElements.map((img, idx) => {
-                  console.log(
-                    `[IMAGE DETECTED] #${idx + 1} - Src: ${img.src.substring(0, 60)}...`,
-                  );
-                  return {
-                    src: img.src,
-                    id: img.id || `unknown_${idx}`,
-                    width: img.width || 0,
-                    height: img.height || 0,
-                  };
-                });
-
-                text = text.trim();
-
-                // CÓ CẢ ẢNH VÀ TEXT (caption)
-                if (text) {
-                  console.log(
-                    `[MIXED DETECTED] Images with caption: "${text.substring(0, 50)}..."`,
-                  );
-                  if (images.length === 1) {
-                    return {
-                      type: "image_with_text",
-                      image: images[0],
-                      caption: text,
-                    };
-                  } else {
-                    return {
-                      type: "images_with_text",
-                      images: images,
-                      count: images.length,
-                      caption: text,
-                    };
-                  }
-                }
-
-                // CHỈ CÓ ẢNH (không có text)
-                if (images.length === 1) {
-                  return {
-                    type: "image",
-                    ...images[0],
-                    foundBy: "single image",
-                  };
-                } else {
-                  return {
-                    type: "images",
-                    images: images,
-                    count: images.length,
-                  };
-                }
-              }
-
-              // CHỈ CÓ TEXT (không có ảnh) - text đã được lấy ở trên
-              if (text) return { type: "text", content: text };
-            }
-          }
-          return null;
-        });
-
-        if (
-          currentMsg &&
-          JSON.stringify(currentMsg) !== JSON.stringify(this.lastMessage)
-        ) {
-          let messageAdded = false;
-
-          if (currentMsg.type === "text") {
-            this.emit("log", `📨 Tin nhắn text mới: "${currentMsg.content}"`);
-            this.lastMessage = currentMsg;
-            this.saveLastMessage(currentMsg.content);
-            this.pendingMessages.push(currentMsg);
-            messageAdded = true;
-          } else if (currentMsg.type === "image") {
-            this.emit("log", `📨 Tin nhắn ảnh mới!`);
-            this.emit(
-              "log",
-              `   - Tìm thấy bởi: ${currentMsg.foundBy || "unknown"}`,
-            );
-            this.emit("log", `   - ID: ${currentMsg.id}`);
-            this.emit(
-              "log",
-              `   - Kích thước: ${currentMsg.width}x${currentMsg.height}`,
-            );
-            this.emit("log", `   - Src: ${currentMsg.src.substring(0, 60)}...`);
-
-            const timestamp = Date.now();
-            const fileName = `image_${timestamp}.jpg`;
-            this.emit("log", `⬇️ Bắt đầu download ảnh: ${fileName}`);
-
-            const filePath = await this.downloadImage(currentMsg.src, fileName);
-
-            if (filePath) {
-              this.emit("log", `✅ Download thành công: ${filePath}`);
-              this.lastMessage = currentMsg;
-              this.saveLastMessage(`[IMAGE:${fileName}]`);
-              this.pendingMessages.push({
-                type: "image",
-                filePath: filePath,
-              });
-              messageAdded = true;
-            } else {
-              this.emit("error", `❌ Download ảnh thất bại!`);
-            }
-          } else if (currentMsg.type === "images") {
-            // XỬ LÝ NHIỀU ẢNH (ALBUM)
-            this.emit("log", `📨 Tin nhắn ${currentMsg.count} ảnh mới!`);
-
-            const filePaths = [];
-            const timestamp = Date.now();
-
-            // Download tất cả ảnh
-            for (let idx = 0; idx < currentMsg.images.length; idx++) {
-              const img = currentMsg.images[idx];
-              const fileName = `image_${timestamp}_${idx + 1}.jpg`;
-
-              this.emit(
-                "log",
-                `   ⬇️ [${idx + 1}/${currentMsg.count}] Download: ${fileName}`,
-              );
-              this.emit(
-                "log",
-                `      - Kích thước: ${img.width}x${img.height}`,
-              );
-
-              const filePath = await this.downloadImage(img.src, fileName);
-
-              if (filePath) {
-                this.emit("log", `      ✅ Download thành công`);
-                filePaths.push(filePath);
-              } else {
-                this.emit("error", `      ❌ Download thất bại`);
-              }
-
-              // Delay nhỏ giữa các lần download
-              await new Promise((resolve) => setTimeout(resolve, 300));
-            }
-
-            if (filePaths.length > 0) {
-              this.emit(
-                "log",
-                `✅ Download xong ${filePaths.length}/${currentMsg.count} ảnh`,
-              );
-              this.lastMessage = currentMsg;
-              this.saveLastMessage(`[IMAGES:${filePaths.length}]`);
-              this.pendingMessages.push({
-                type: "images",
-                filePaths: filePaths,
-                count: filePaths.length,
-              });
-              messageAdded = true;
-            } else {
-              this.emit("error", `❌ Không download được ảnh nào!`);
-            }
-          } else if (currentMsg.type === "image_with_text") {
-            // XỬ LÝ 1 ẢNH + TEXT (CAPTION) - CỘI LÀ 1 TIN NHẮN DUY NHẤT
-            this.emit("log", `📨 Tin nhắn mới: 1 ảnh + caption (1 tin nhắn)`);
-            this.emit(
-              "log",
-              `   - Caption: "${currentMsg.caption.substring(0, 50)}${currentMsg.caption.length > 50 ? "..." : ""}"`,
-            );
-
-            const timestamp = Date.now();
-            const fileName = `image_${timestamp}.jpg`;
-            this.emit("log", `⬇️ Download ảnh: ${fileName}`);
-
-            const filePath = await this.downloadImage(
-              currentMsg.image.src,
-              fileName,
-            );
-
-            if (filePath) {
-              this.emit("log", `✅ Download thành công`);
-              this.lastMessage = currentMsg;
-              this.saveLastMessage(`[IMAGE+TEXT:${fileName}]`);
-              // Push vào queue như 1 tin nhắn duy nhất
-              this.pendingMessages.push({
-                type: "image_with_text",
-                filePath: filePath,
-                caption: currentMsg.caption,
-              });
-              this.emit(
-                "log",
-                `   ➕ Đã thêm 1 tin nhắn (ảnh + text) vào queue`,
-              );
-              messageAdded = true;
-            } else {
-              this.emit("error", `❌ Download ảnh thất bại!`);
-            }
-          } else if (currentMsg.type === "images_with_text") {
-            // XỬ LÝ NHIỀU ẢNH + TEXT (ALBUM + CAPTION) - CỘI LÀ 1 TIN NHẮN DUY NHẤT
-            this.emit(
-              "log",
-              `📨 Tin nhắn mới: ${currentMsg.count} ảnh + caption (1 tin nhắn)`,
-            );
-            this.emit(
-              "log",
-              `   - Caption: "${currentMsg.caption.substring(0, 50)}${currentMsg.caption.length > 50 ? "..." : ""}"`,
-            );
-
-            const filePaths = [];
-            const timestamp = Date.now();
-
-            // Download tất cả ảnh
-            for (let idx = 0; idx < currentMsg.images.length; idx++) {
-              const img = currentMsg.images[idx];
-              const fileName = `image_${timestamp}_${idx + 1}.jpg`;
-
-              this.emit(
-                "log",
-                `   ⬇️ [${idx + 1}/${currentMsg.count}] Download: ${fileName}`,
-              );
-
-              const filePath = await this.downloadImage(img.src, fileName);
-
-              if (filePath) {
-                this.emit("log", `      ✅ Download thành công`);
-                filePaths.push(filePath);
-              } else {
-                this.emit("error", `      ❌ Download thất bại`);
-              }
-
-              await new Promise((resolve) => setTimeout(resolve, 300));
-            }
-
-            if (filePaths.length > 0) {
-              this.emit(
-                "log",
-                `✅ Download xong ${filePaths.length}/${currentMsg.count} ảnh`,
-              );
-              this.lastMessage = currentMsg;
-              this.saveLastMessage(`[IMAGES+TEXT:${filePaths.length}]`);
-              // Push vào queue như 1 tin nhắn duy nhất
-              this.pendingMessages.push({
-                type: "images_with_text",
-                filePaths: filePaths,
-                count: filePaths.length,
-                caption: currentMsg.caption,
-              });
-              this.emit(
-                "log",
-                `   ➕ Đã thêm 1 tin nhắn (${filePaths.length} ảnh + text) vào queue`,
-              );
-              messageAdded = true;
-            } else {
-              this.emit("error", `❌ Không download được ảnh nào!`);
-            }
-          }
-
-          // CHỈ setup debounce timer NẾU ĐÃ THÊM TIN NHẮN VÀO QUEUE
-          if (messageAdded) {
-            this.emit(
-              "log",
-              `⏳ Đã thêm vào queue (${this.pendingMessages.length} tin nhắn chờ)`,
-            );
-
-            // Clear timer cũ và set timer mới (debounce)
-            if (this.debounceTimer) {
-              clearTimeout(this.debounceTimer);
-              this.emit("log", `🔄 Reset timer 5s (có tin nhắn mới)`);
-            } else {
-              this.emit("log", `⏱️ Bắt đầu đếm 5s...`);
-            }
-
-            this.debounceTimer = setTimeout(async () => {
-              this.emit(
-                "log",
-                `⏰ Hết 5s không có tin nhắn mới → Bắt đầu di chuyển sang nhóm đích...`,
-              );
-              await this.sendPendingMessages();
-            }, this.debounceDelay);
-          }
-        }
-      } catch (error) {
-        if (!error.message.includes("detached Frame")) {
-          this.emit("error", `❌ ${error.message}`);
+        try {
+          this.emit("log", `[Listener] Vao nhom "${groupName}"...`);
+          await this._navigateToGroup(this.page, groupName);
+          // Cho DOM load tin nhan
+          await new Promise((r) => setTimeout(r, this.checkInterval));
+          await this._scanGroup(groupName);
+        } catch (err) {
+          this.emit("error", `[${groupName}] Loi quet: ${err.message}`);
         }
       }
-    }, this.checkInterval);
+
+      // ── Phase 2: Kiem tra co can forward khong ──
+      const elapsed = Date.now() - lastForwardTime;
+      if (elapsed >= this.forwardInterval) {
+        if (this.messageQueue.length > 0) {
+          this.emit(
+            "log",
+            `[Forwarder] Co ${this.messageQueue.length} tin nhan, dang gui...`,
+          );
+          await this._forwardAll();
+        } else {
+          this.emit("log", "[Forwarder] Khong co tin nhan, tiep tuc lang nghe");
+        }
+        lastForwardTime = Date.now();
+      } else {
+        const remaining = Math.round((this.forwardInterval - elapsed) / 1000);
+        this.emit("log", `[Timer] Con ${remaining}s den lan forward tiep theo`);
+      }
+
+      // Delay truoc vong tiep theo
+      if (this.running) {
+        await new Promise((r) => setTimeout(r, 500));
+      }
+    }
   }
 
-  async stop() {
-    // Clear debounce timer
-    if (this.debounceTimer) {
-      clearTimeout(this.debounceTimer);
-      this.debounceTimer = null;
-    }
+  // ─── SCAN GROUP ───────────────────────────────────────────────────────────
+  //  Quet 1 nhom nguon, phat hien tin nhan moi, download anh, luu vao queue
 
-    // Gửi tin nhắn còn lại nếu có
-    if (this.pendingMessages.length > 0) {
+  async _scanGroup(groupName) {
+    if (!this.seenFrameIds[groupName]) {
+      this.seenFrameIds[groupName] = new Set();
+    }
+    const seenIds = this.seenFrameIds[groupName];
+
+    // Lay tat ca tin nhan khong phai cua minh tu DOM
+    const allMessages = await this.page.evaluate(() => {
+      const frames = document.querySelectorAll(
+        '[id^="message-frame_"], .message-frame, .message-non-frame',
+      );
+
+      const results = [];
+
+      for (let i = 0; i < frames.length; i++) {
+        if (frames[i].classList.contains("me")) continue;
+
+        const frameId = frames[i].id;
+        if (!frameId) continue;
+
+        // Kiem tra anh
+        let imgElements = [];
+        const imageContainers = frames[i].querySelectorAll(
+          '.chatImageMessage--audit, .img-msg-v2.photo-message-v2, .album, [id^="album-container"]',
+        );
+        if (imageContainers.length > 0) {
+          imageContainers.forEach((container) => {
+            container.querySelectorAll('img[src^="blob:"]').forEach((img) => {
+              if (!img.closest(".link-message")) imgElements.push(img);
+            });
+          });
+        }
+        if (imgElements.length === 0) {
+          frames[i].querySelectorAll('img[src^="blob:"]').forEach((img) => {
+            if (!img.closest(".link-message")) imgElements.push(img);
+          });
+        }
+
+        // Lay text
+        let text = "";
+        const textContainer = frames[i].querySelector(
+          '[data-component="message-text-content"]',
+        );
+        if (textContainer) {
+          text = textContainer.innerText || textContainer.textContent || "";
+        }
+        if (!text.trim()) {
+          const imgCaption = frames[i].querySelector(
+            '.img-msg-v2__cap [data-component="message-text-content"]',
+          );
+          if (imgCaption) {
+            text = imgCaption.innerText || imgCaption.textContent || "";
+          }
+        }
+        if (!text.trim()) {
+          const msgContainer = frames[i].querySelector(".text-message__container");
+          if (msgContainer) text = msgContainer.innerText || msgContainer.textContent || "";
+        }
+        if (!text.trim()) {
+          const textSpan = frames[i].querySelector("span.text");
+          if (textSpan) {
+            text = textSpan.innerText || "";
+            if (!text.trim()) {
+              let html = textSpan.innerHTML;
+              html = html.replace(/<br\s*\/?>/gi, "\n");
+              html = html.replace(/<\/(div|p)>/gi, "\n");
+              html = html.replace(/<[^>]*>/g, "");
+              const tmp = document.createElement("textarea");
+              tmp.innerHTML = html;
+              text = tmp.value;
+            }
+          }
+        }
+        text = text.trim();
+
+        if (imgElements.length === 0 && !text) continue;
+
+        const images = imgElements.map((img, idx) => ({
+          src: img.src,
+          id: img.id || `unknown_${idx}`,
+          width: img.width || 0,
+          height: img.height || 0,
+        }));
+
+        results.push({ frameId, text, images });
+      }
+
+      return results;
+    });
+
+    // Lan quet dau tien cho nhom nay: danh dau tat ca la da thay
+    if (!this.groupInitialized[groupName]) {
+      for (const msg of allMessages) seenIds.add(msg.frameId);
+      this.groupInitialized[groupName] = true;
       this.emit(
         "log",
-        `⚠️ Còn ${this.pendingMessages.length} tin nhắn chưa gửi, đang gửi...`,
+        `[${groupName}] Khoi tao, ${allMessages.length} tin nhan hien co`,
       );
-      await this.sendPendingMessages();
+      return;
     }
 
-    if (this.intervalId) {
-      clearInterval(this.intervalId);
-      this.intervalId = null;
+    // Tim tin nhan moi
+    const newMessages = allMessages.filter((m) => !seenIds.has(m.frameId));
+    if (newMessages.length === 0) {
+      this.emit("log", `[${groupName}] Khong co tin nhan moi`);
+      return;
     }
+
+    // Phat hien page refresh: khong co overlap
+    const hasOverlap = allMessages.some((m) => seenIds.has(m.frameId));
+    if (!hasOverlap) {
+      this.emit("log", `[${groupName}] Page refresh, khoi tao lai...`);
+      seenIds.clear();
+      for (const msg of allMessages) seenIds.add(msg.frameId);
+      return;
+    }
+
+    this.emit("log", `[${groupName}] ${newMessages.length} tin nhan moi`);
+
+    // Xu ly tung tin nhan moi - download anh TRUOC khi navigate di
+    for (const msg of newMessages) {
+      seenIds.add(msg.frameId);
+
+      const timestamp = Date.now();
+      const msgId = `${timestamp}_${Math.random().toString(36).slice(2, 7)}`;
+      const hasImages = msg.images.length > 0;
+      const hasText = !!msg.text;
+
+      if (!hasImages && hasText) {
+        this.emit("log", `[${groupName}] Text: "${msg.text.substring(0, 60)}"`);
+        await this.appendMessage({
+          id: msgId,
+          sourceGroup: groupName,
+          type: "text",
+          content: msg.text,
+          timestamp,
+        });
+      } else if (hasImages && !hasText) {
+        if (msg.images.length === 1) {
+          this.emit("log", `[${groupName}] Anh don`);
+          const fileName = `image_${timestamp}.jpg`;
+          const filePath = await this._downloadImage(
+            this.page,
+            msg.images[0].src,
+            fileName,
+          );
+          if (filePath) {
+            await this.appendMessage({
+              id: msgId,
+              sourceGroup: groupName,
+              type: "image",
+              filePath,
+              timestamp,
+            });
+          }
+        } else {
+          this.emit("log", `[${groupName}] Album ${msg.images.length} anh`);
+          const filePaths = [];
+          for (let idx = 0; idx < msg.images.length; idx++) {
+            const fileName = `image_${timestamp}_${idx + 1}.jpg`;
+            const fp = await this._downloadImage(
+              this.page,
+              msg.images[idx].src,
+              fileName,
+            );
+            if (fp) filePaths.push(fp);
+            await new Promise((r) => setTimeout(r, 300));
+          }
+          if (filePaths.length > 0) {
+            await this.appendMessage({
+              id: msgId,
+              sourceGroup: groupName,
+              type: "images",
+              filePaths,
+              count: filePaths.length,
+              timestamp,
+            });
+          }
+        }
+      } else if (hasImages && hasText) {
+        if (msg.images.length === 1) {
+          this.emit("log", `[${groupName}] Anh + caption`);
+          const fileName = `image_${timestamp}.jpg`;
+          const filePath = await this._downloadImage(
+            this.page,
+            msg.images[0].src,
+            fileName,
+          );
+          if (filePath) {
+            await this.appendMessage({
+              id: msgId,
+              sourceGroup: groupName,
+              type: "image_with_text",
+              filePath,
+              caption: msg.text,
+              timestamp,
+            });
+          }
+        } else {
+          this.emit("log", `[${groupName}] Album ${msg.images.length} anh + caption`);
+          const filePaths = [];
+          for (let idx = 0; idx < msg.images.length; idx++) {
+            const fileName = `image_${timestamp}_${idx + 1}.jpg`;
+            const fp = await this._downloadImage(
+              this.page,
+              msg.images[idx].src,
+              fileName,
+            );
+            if (fp) filePaths.push(fp);
+            await new Promise((r) => setTimeout(r, 300));
+          }
+          if (filePaths.length > 0) {
+            await this.appendMessage({
+              id: msgId,
+              sourceGroup: groupName,
+              type: "images_with_text",
+              filePaths,
+              count: filePaths.length,
+              caption: msg.text,
+              timestamp,
+            });
+          }
+        }
+      }
+    }
+
+    // Gioi han seenIds size
+    if (seenIds.size > 500) {
+      const arr = [...seenIds];
+      this.seenFrameIds[groupName] = new Set(arr.slice(-300));
+    }
+
+    // Luu state
+    const stateData = this.loadState();
+    stateData[groupName] = {
+      lastFrameId: newMessages[newMessages.length - 1].frameId,
+      timestamp: Date.now(),
+    };
+    this.saveState(stateData);
+  }
+
+  // ─── FORWARD ALL ──────────────────────────────────────────────────────────
+  //  Vao nhom dich, gui tung tin nhan, xoa khoi queue, roi quay lai
+
+  async _forwardAll() {
+    try {
+      this.emit("log", `[Forwarder] Vao nhom dich "${this.targetGroup}"...`);
+      await this._navigateToGroup(this.page, this.targetGroup);
+      await new Promise((r) => setTimeout(r, 2000));
+
+      const toForward = await this._withQueueLock(() => [...this.messageQueue]);
+      const forwarded = [];
+      const failed = [];
+      const MAX_RETRIES = 3;
+      const MAX_AGE_MS = 30 * 60 * 1000; // 30 phut
+
+      for (const msg of toForward) {
+        if (!this.running) break;
+
+        // Bo qua message qua cu hoac qua nhieu lan retry
+        if ((msg.retryCount || 0) >= MAX_RETRIES) {
+          this.emit("log", `[Forwarder] Bo qua msg ${msg.id} (qua ${MAX_RETRIES} lan retry)`);
+          this._deleteMessageFiles(msg);
+          forwarded.push(msg.id);
+          continue;
+        }
+        if (msg.createdAt && Date.now() - msg.createdAt > MAX_AGE_MS) {
+          this.emit("log", `[Forwarder] Bo qua msg ${msg.id} (qua 30 phut)`);
+          this._deleteMessageFiles(msg);
+          forwarded.push(msg.id);
+          continue;
+        }
+
+        try {
+          await this._forwardMessage(this.page, msg);
+          forwarded.push(msg.id);
+        } catch (err) {
+          this.emit("error", `[Forwarder] Loi gui msg ${msg.id}: ${err.message}`);
+          failed.push(msg.id);
+        }
+      }
+
+      // Cap nhat queue
+      if (forwarded.length > 0 || failed.length > 0) {
+        await this._withQueueLock(() => {
+          this.messageQueue = this.messageQueue
+            .filter((m) => !forwarded.includes(m.id))
+            .map((m) => {
+              if (failed.includes(m.id)) {
+                return { ...m, retryCount: (m.retryCount || 0) + 1 };
+              }
+              return m;
+            });
+          this._flushQueueToDisk();
+        });
+      }
+
+      if (forwarded.length > 0) {
+        this.emit("log", `[Forwarder] Da gui ${forwarded.length} tin nhan`);
+      }
+      if (failed.length > 0) {
+        this.emit("log", `[Forwarder] ${failed.length} tin nhan loi, se thu lai lan sau`);
+      }
+    } catch (err) {
+      this.emit("error", `[Forwarder] Loi: ${err.message}`);
+    }
+  }
+
+  _deleteMessageFiles(msg) {
+    const files = msg.filePath ? [msg.filePath] : msg.filePaths || [];
+    for (const fp of files) {
+      try {
+        const abs = path.resolve(fp);
+        if (fs.existsSync(abs)) fs.unlinkSync(abs);
+      } catch { /* ignore */ }
+    }
+  }
+
+  // ─── NAVIGATION ───────────────────────────────────────────────────────────
+
+  async _gotoZalo(page) {
+    let retries = 0;
+    while (retries < 3) {
+      try {
+        await page.goto("https://chat.zalo.me/", {
+          waitUntil: "networkidle2",
+          timeout: 60000,
+        });
+        return;
+      } catch (err) {
+        retries++;
+        if (retries >= 3) throw err;
+        this.emit("log", `Retry tai Zalo (${retries}/3)...`);
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+    }
+  }
+
+  async _waitForZaloReady(page) {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        await page.waitForSelector("#contact-search-input", { timeout: 30000 });
+        return;
+      } catch {
+        this.emit("log", `Zalo chua san sang, reload (${attempt}/3)...`);
+        await page.reload({ waitUntil: "networkidle2", timeout: 60000 });
+      }
+    }
+    throw new Error("Khong the tai Zalo sau 3 lan thu");
+  }
+
+  async _navigateToGroup(page, groupName) {
+    // 1. Focus va xoa search input truoc khi type
+    const searchInput = await page.$("#contact-search-input");
+    if (!searchInput) throw new Error("Khong tim thay #contact-search-input");
+
+    await searchInput.click();
+    await new Promise((r) => setTimeout(r, 300));
+
+    // Xoa text cu trong search input
+    await page.keyboard.down("Control");
+    await page.keyboard.press("KeyA");
+    await page.keyboard.up("Control");
+    await page.keyboard.press("Backspace");
+    await new Promise((r) => setTimeout(r, 300));
+
+    // 2. Type ten nhom va cho ket qua search
+    await searchInput.type(groupName, { delay: 30 });
+    await new Promise((r) => setTimeout(r, 2000));
+
+    // 3. Nhan Enter de chon ket qua dau tien
+    await page.keyboard.press("Enter");
+    await new Promise((r) => setTimeout(r, 2500));
+
+    // 4. Xoa search input sau khi da vao nhom
+    const searchInput2 = await page.$("#contact-search-input");
+    if (searchInput2) {
+      await searchInput2.click({ clickCount: 3 });
+      await page.keyboard.press("Backspace");
+      await new Promise((r) => setTimeout(r, 300));
+    }
+  }
+
+  // ─── FORWARD MESSAGE (giu nguyen logic cu) ────────────────────────────────
+
+  async _forwardMessage(page, msg) {
+    if (msg.type === "text") {
+      this.emit("log", `  -> Text: "${msg.content.substring(0, 50)}"`);
+
+      const richInput = await page.$("#richInput");
+      if (!richInput) throw new Error("Khong tim thay #richInput");
+
+      await richInput.click();
+      await new Promise((r) => setTimeout(r, 200));
+
+      await page.keyboard.down("Control");
+      await page.keyboard.press("KeyA");
+      await page.keyboard.up("Control");
+      await page.keyboard.press("Backspace");
+      await new Promise((r) => setTimeout(r, 100));
+
+      const content = (await transformText(msg.content)) || msg.content;
+      await this._typeMultiline(page, richInput, content);
+
+      await new Promise((r) => setTimeout(r, 200));
+      await page.keyboard.press("Enter");
+      await new Promise((r) => setTimeout(r, 800));
+    } else if (msg.type === "image") {
+      this.emit("log", "  -> Anh don");
+      await this._dropFiles(page, [msg.filePath]);
+      await new Promise((r) => setTimeout(r, 2500));
+      await this._clickSendOrEnter(page);
+      await new Promise((r) => setTimeout(r, 1500));
+      this._deleteFiles([msg.filePath]);
+    } else if (msg.type === "images") {
+      this.emit("log", `  -> Album ${msg.count} anh`);
+      await this._dropFiles(page, msg.filePaths);
+      await new Promise((r) => setTimeout(r, 3000));
+      await this._clickSendOrEnter(page);
+      await new Promise((r) => setTimeout(r, 2000));
+      this._deleteFiles(msg.filePaths);
+    } else if (msg.type === "image_with_text") {
+      this.emit("log", "  -> Anh + caption");
+      await this._dropFiles(page, [msg.filePath]);
+      await new Promise((r) => setTimeout(r, 2500));
+
+      const richInput = await page.$("#richInput");
+      if (richInput) {
+        await richInput.click();
+        await new Promise((r) => setTimeout(r, 200));
+        const caption = (await transformText(msg.caption)) || msg.caption;
+        await this._typeMultiline(page, richInput, caption);
+      }
+      await new Promise((r) => setTimeout(r, 500));
+      await page.keyboard.press("Enter");
+      await new Promise((r) => setTimeout(r, 2000));
+      this._deleteFiles([msg.filePath]);
+    } else if (msg.type === "images_with_text") {
+      this.emit("log", `  -> Album ${msg.count} anh + caption`);
+      await this._dropFiles(page, msg.filePaths);
+      await new Promise((r) => setTimeout(r, 2500));
+
+      const richInput = await page.$("#richInput");
+      if (richInput) {
+        await richInput.click();
+        await new Promise((r) => setTimeout(r, 200));
+        const caption = (await transformText(msg.caption)) || msg.caption;
+        await this._typeMultiline(page, richInput, caption);
+      }
+      await new Promise((r) => setTimeout(r, 500));
+      await page.keyboard.press("Enter");
+      await new Promise((r) => setTimeout(r, 2000));
+      this._deleteFiles(msg.filePaths);
+    }
+  }
+
+  async _typeMultiline(page, inputElement, text) {
+    if (text.includes("\n")) {
+      const lines = text.split("\n");
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i]) await inputElement.type(lines[i], { delay: 5 });
+        if (i < lines.length - 1) {
+          await page.keyboard.down("Shift");
+          await page.keyboard.press("Enter");
+          await page.keyboard.up("Shift");
+          await new Promise((r) => setTimeout(r, 30));
+        }
+      }
+    } else {
+      await inputElement.type(text, { delay: 5 });
+    }
+  }
+
+  async _dropFiles(page, filePaths) {
+    const validPaths = filePaths
+      .map((fp) => path.resolve(fp))
+      .filter((fp) => {
+        if (fs.existsSync(fp)) return true;
+        this.emit("error", `File khong ton tai: ${fp}`);
+        return false;
+      });
+
+    if (validPaths.length === 0) throw new Error("Khong co file hop le de gui");
+
+    const filesData = validPaths.map((fp) => ({
+      name: path.basename(fp),
+      base64: fs.readFileSync(fp).toString("base64"),
+      mimeType: "image/jpeg",
+    }));
+
+    const dropSelectors = [
+      ".dragOverlayInputbox",
+      "#richInput",
+      '[data-id="richInput"]',
+      ".chat-input",
+      ".input-area",
+    ];
+
+    let usedSelector = null;
+    for (const selector of dropSelectors) {
+      const el = await page.$(selector);
+      if (el) { usedSelector = selector; break; }
+    }
+
+    if (!usedSelector) throw new Error("Khong tim thay vung drop");
+
+    await page.evaluate(
+      async (selector, filesData) => {
+        const element = document.querySelector(selector);
+        if (!element) throw new Error(`Element ${selector} not found`);
+
+        const dataTransfer = new DataTransfer();
+        for (const fileData of filesData) {
+          const bytes = atob(fileData.base64);
+          const arr = new Uint8Array(bytes.length);
+          for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
+          const blob = new Blob([arr], { type: fileData.mimeType });
+          dataTransfer.items.add(new File([blob], fileData.name, { type: fileData.mimeType }));
+        }
+
+        const opts = { bubbles: true, cancelable: true, dataTransfer };
+        element.dispatchEvent(new DragEvent("dragenter", opts));
+        element.dispatchEvent(new DragEvent("dragover", opts));
+        element.dispatchEvent(new DragEvent("drop", opts));
+      },
+      usedSelector,
+      filesData,
+    );
+  }
+
+  async _clickSendOrEnter(page) {
+    const sendSelectors = [
+      'button[data-translate-inner="STR_SEND"]',
+      "button.btn-send",
+      'button[title*="Gui"]',
+      'button[aria-label*="Send"]',
+      ".btn-send-photo",
+    ];
+    for (const selector of sendSelectors) {
+      try {
+        const btn = await page.$(selector);
+        if (btn) { await btn.click(); return; }
+      } catch { /* ignore */ }
+    }
+    await page.keyboard.press("Enter");
+  }
+
+  _deleteFiles(filePaths) {
+    for (const fp of filePaths) {
+      const abs = path.resolve(fp);
+      try {
+        if (fs.existsSync(abs)) {
+          fs.unlinkSync(abs);
+          this.emit("log", `  Da xoa: ${path.basename(abs)}`);
+        }
+      } catch (err) {
+        this.emit("error", `Khong xoa duoc: ${path.basename(abs)}`);
+      }
+    }
+  }
+
+  // ─── DOWNLOAD IMAGE ───────────────────────────────────────────────────────
+
+  async _downloadImage(page, blobUrl, fileName) {
+    try {
+      this.emit("log", `  Download: ${fileName}`);
+
+      const base64Data = await page.evaluate(async (url) => {
+        try {
+          const response = await fetch(url);
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const blob = await response.blob();
+          return await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onloadend = () => resolve(reader.result);
+            reader.onerror = () => reject(new Error("FileReader error"));
+            reader.readAsDataURL(blob);
+          });
+        } catch (err) {
+          return `ERROR: ${err.message}`;
+        }
+      }, blobUrl);
+
+      if (typeof base64Data === "string" && base64Data.startsWith("ERROR:")) {
+        throw new Error(base64Data);
+      }
+      if (!base64Data || !base64Data.includes("base64,")) {
+        throw new Error("Invalid base64 data");
+      }
+
+      const base64Image = base64Data.split(";base64,").pop();
+      const filePath = path.resolve(IMAGES_PATH, fileName);
+      fs.writeFileSync(filePath, base64Image, { encoding: "base64" });
+
+      const size = fs.statSync(filePath).size;
+      this.emit("log", `  Saved: ${fileName} (${(size / 1024).toFixed(1)} KB)`);
+      return filePath;
+    } catch (error) {
+      this.emit("error", `  Loi download anh: ${error.message}`);
+      return null;
+    }
+  }
+
+  // ─── STOP ─────────────────────────────────────────────────────────────────
+
+  async stop() {
+    this.running = false;
+    this.page = null;
+
     if (this.browser) {
-      await this.browser.close();
+      try {
+        await this.browser.close();
+      } catch { /* ignore */ }
       this.browser = null;
     }
 
-    // Lưu state trước khi dừng
-    if (this.lastMessage) {
-      this.saveLastMessage(this.lastMessage);
-      this.emit("log", `💾 Đã lưu tin nhắn cuối: "${this.lastMessage}"`);
-    }
-
-    this.emit("status", "Bot đã dừng");
+    this._flushQueueToDisk();
+    this.emit("status", "Bot da dung");
   }
 }
 

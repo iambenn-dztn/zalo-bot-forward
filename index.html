@@ -17,8 +17,8 @@
 
         <div class="config-section">
             <div class="form-group">
-                <label for="sourceGroup">Nhóm nguồn (lấy tin nhắn):</label>
-                <input type="text" id="sourceGroup" placeholder="Nhập tên nhóm nguồn" value="Nhóm 1">
+                <label for="sourceGroups">Nhóm nguồn (mỗi dòng 1 nhóm):</label>
+                <textarea id="sourceGroups" rows="4" placeholder="Nhóm A&#10;Nhóm B&#10;Nhóm C">Nhóm 1</textarea>
             </div>
 
             <div class="form-group">
@@ -27,8 +27,18 @@
             </div>
 
             <div class="form-group">
-                <label for="checkInterval">Thời gian quét (ms):</label>
-                <input type="number" id="checkInterval" value="1000" min="1000" step="100">
+                <label for="checkInterval">Thời gian chờ load tin nhắn mỗi nhóm (ms):</label>
+                <input type="number" id="checkInterval" value="3000" min="1000" step="500">
+            </div>
+
+            <div class="form-group">
+                <label for="forwardInterval">Chu kỳ forward (ms) - mặc định 30 giây:</label>
+                <input type="number" id="forwardInterval" value="30000" min="10000" step="5000">
+            </div>
+
+            <div class="form-group">
+                <label for="chromePath">Đường dẫn Chrome (để trống nếu dùng mặc định):</label>
+                <input type="text" id="chromePath" placeholder="C:\Program Files\Google\Chrome\Application\chrome.exe">
             </div>
 
             <div class="button-group">
