@@ -15,12 +15,17 @@ const STATE_FILE = "./bot_state.json";
 class Bot extends EventEmitter {
   constructor(config) {
     super();
-    this.sourceGroups = config.sourceGroups || [];
-    this.targetGroup = config.targetGroup;
-    // Thoi gian cho sau khi navigate vao nhom de DOM load (ms)
+    // 1 nhom nguon
+    this.sourceGroup = config.sourceGroup
+      || (Array.isArray(config.sourceGroups) ? config.sourceGroups[0] : "");
+    // N nhom dich
+    this.targetGroups = Array.isArray(config.targetGroups)
+      ? config.targetGroups
+      : (config.targetGroup ? [config.targetGroup] : []);
+    // Thoi gian cho DOM load + chu ky quet trong cua so lang nghe (ms)
     this.checkInterval = config.checkInterval || 3000;
-    // Chu ky forward (ms) - mac dinh 30 giay
-    this.forwardInterval = config.forwardInterval || 30000;
+    // Cua so lang nghe truoc khi forward (ms) - mac dinh 1 phut
+    this.forwardInterval = config.forwardInterval || 60000;
     // Duong dan Chrome executable (de trong neu dung mac dinh cua Puppeteer)
     this.chromePath = config.chromePath || undefined;
 
@@ -119,8 +124,10 @@ class Bot extends EventEmitter {
           : "Dang khoi dong... (Can quet QR)",
       );
 
+      // Lan dau (chua co session): hien UI de scan QR
+      // Co session roi: chay ngam (headless "new" — it bi phat hien hon)
       this.browser = await puppeteer.launch({
-        headless: hasSession,
+        headless: hasSession ? "new" : false,
         userDataDir: SESSION_PATH,
         ...(this.chromePath ? { executablePath: this.chromePath } : {}),
         args: [
@@ -141,17 +148,14 @@ class Bot extends EventEmitter {
 
       if (!hasSession) {
         this.emit("status", "Vui long quet QR code de dang nhap...");
-      }
-
-      await this.page.waitForSelector("#contact-search-input", { timeout: 0 });
-
-      if (!hasSession) {
-        this.emit("log", "Dang nhap thanh cong, dang khoi dong lai...");
+        await this.page.waitForSelector("#contact-search-input", { timeout: 0 });
+        this.emit("log", "Dang nhap thanh cong, dang khoi dong lai headless...");
         await this.browser.close();
         await new Promise((r) => setTimeout(r, 2000));
 
+        // Relaunch headless sau khi da login
         this.browser = await puppeteer.launch({
-          headless: false,
+          headless: "new",
           userDataDir: SESSION_PATH,
           ...(this.chromePath ? { executablePath: this.chromePath } : {}),
           args: [
@@ -167,6 +171,8 @@ class Bot extends EventEmitter {
         this.page = (await this.browser.pages())[0] || (await this.browser.newPage());
         await this.page.setViewport({ width: 1366, height: 768 });
         await this._gotoZalo(this.page);
+        await this._waitForZaloReady(this.page);
+      } else {
         await this._waitForZaloReady(this.page);
       }
 
@@ -189,7 +195,7 @@ class Bot extends EventEmitter {
       this.emit("status", "Bot dang chay");
       this.emit(
         "log",
-        `1 tab: lang nghe ${this.sourceGroups.length} nhom, forward moi ${this.forwardInterval / 1000}s`,
+        `Lang nghe "${this.sourceGroup}" trong ${this.forwardInterval / 1000}s, forward toi ${this.targetGroups.length} nhom dich`,
       );
 
       // Bat dau vong lap chinh
@@ -208,50 +214,47 @@ class Bot extends EventEmitter {
   }
 
   // ─── MAIN LOOP ────────────────────────────────────────────────────────────
-  //  Vong lap: quet tung nhom nguon → khi den han forward → vao nhom dich gui
-  //  → quay lai quet tiep
+  //  1. Vao nhom nguon, lang nghe trong forwardInterval ms (quet moi checkInterval)
+  //  2. Lan luot vao tung nhom dich, gui tat ca tin nhan trong queue
+  //  3. Xoa queue, quay lai nhom nguon de lang nghe tiep
 
   async _mainLoop() {
-    let lastForwardTime = Date.now();
-
     while (this.running) {
-      // ── Phase 1: Lang nghe - quet tung nhom nguon ──
-      for (let i = 0; i < this.sourceGroups.length; i++) {
-        if (!this.running) break;
-        const groupName = this.sourceGroups[i];
+      // ── Phase 1: Vao nhom nguon va lang nghe ──
+      try {
+        this.emit("log", `[Listener] Vao nhom nguon "${this.sourceGroup}"...`);
+        await this._navigateToGroup(this.page, this.sourceGroup);
+        await new Promise((r) => setTimeout(r, this.checkInterval));
+      } catch (err) {
+        this.emit("error", `[${this.sourceGroup}] Loi vao nhom: ${err.message}`);
+        await new Promise((r) => setTimeout(r, 5000));
+        continue;
+      }
 
+      const listenStart = Date.now();
+      this.emit("log", `[Listener] Lang nghe ${this.forwardInterval / 1000}s...`);
+      while (this.running && Date.now() - listenStart < this.forwardInterval) {
         try {
-          this.emit("log", `[Listener] Vao nhom "${groupName}"...`);
-          await this._navigateToGroup(this.page, groupName);
-          // Cho DOM load tin nhan
-          await new Promise((r) => setTimeout(r, this.checkInterval));
-          await this._scanGroup(groupName);
+          await this._scanGroup(this.sourceGroup);
         } catch (err) {
-          this.emit("error", `[${groupName}] Loi quet: ${err.message}`);
+          this.emit("error", `[${this.sourceGroup}] Loi quet: ${err.message}`);
         }
+        const remaining = this.forwardInterval - (Date.now() - listenStart);
+        if (remaining <= 0) break;
+        await new Promise((r) => setTimeout(r, Math.min(this.checkInterval, remaining)));
       }
 
-      // ── Phase 2: Kiem tra co can forward khong ──
-      const elapsed = Date.now() - lastForwardTime;
-      if (elapsed >= this.forwardInterval) {
-        if (this.messageQueue.length > 0) {
-          this.emit(
-            "log",
-            `[Forwarder] Co ${this.messageQueue.length} tin nhan, dang gui...`,
-          );
-          await this._forwardAll();
-        } else {
-          this.emit("log", "[Forwarder] Khong co tin nhan, tiep tuc lang nghe");
-        }
-        lastForwardTime = Date.now();
+      if (!this.running) break;
+
+      // ── Phase 2: Forward tat ca tin nhan toi tat ca nhom dich ──
+      if (this.messageQueue.length > 0) {
+        this.emit(
+          "log",
+          `[Forwarder] Co ${this.messageQueue.length} tin nhan, gui den ${this.targetGroups.length} nhom dich...`,
+        );
+        await this._forwardToAllTargets();
       } else {
-        const remaining = Math.round((this.forwardInterval - elapsed) / 1000);
-        this.emit("log", `[Timer] Con ${remaining}s den lan forward tiep theo`);
-      }
-
-      // Delay truoc vong tiep theo
-      if (this.running) {
-        await new Promise((r) => setTimeout(r, 500));
+        this.emit("log", "[Listener] Khong co tin nhan moi");
       }
     }
   }
@@ -500,71 +503,70 @@ class Bot extends EventEmitter {
     this.saveState(stateData);
   }
 
-  // ─── FORWARD ALL ──────────────────────────────────────────────────────────
-  //  Vao nhom dich, gui tung tin nhan, xoa khoi queue, roi quay lai
+  // ─── FORWARD TO ALL TARGETS ───────────────────────────────────────────────
+  //  Vao tung nhom dich, gui tat ca tin nhan trong queue, roi xoa queue + xoa file
 
-  async _forwardAll() {
-    try {
-      this.emit("log", `[Forwarder] Vao nhom dich "${this.targetGroup}"...`);
-      await this._navigateToGroup(this.page, this.targetGroup);
-      await new Promise((r) => setTimeout(r, 2000));
+  async _forwardToAllTargets() {
+    const MAX_AGE_MS = 30 * 60 * 1000; // 30 phut
 
-      const toForward = await this._withQueueLock(() => [...this.messageQueue]);
-      const forwarded = [];
-      const failed = [];
-      const MAX_RETRIES = 3;
-      const MAX_AGE_MS = 30 * 60 * 1000; // 30 phut
-
-      for (const msg of toForward) {
-        if (!this.running) break;
-
-        // Bo qua message qua cu hoac qua nhieu lan retry
-        if ((msg.retryCount || 0) >= MAX_RETRIES) {
-          this.emit("log", `[Forwarder] Bo qua msg ${msg.id} (qua ${MAX_RETRIES} lan retry)`);
-          this._deleteMessageFiles(msg);
-          forwarded.push(msg.id);
-          continue;
-        }
-        if (msg.createdAt && Date.now() - msg.createdAt > MAX_AGE_MS) {
-          this.emit("log", `[Forwarder] Bo qua msg ${msg.id} (qua 30 phut)`);
-          this._deleteMessageFiles(msg);
-          forwarded.push(msg.id);
-          continue;
-        }
-
-        try {
-          await this._forwardMessage(this.page, msg);
-          forwarded.push(msg.id);
-        } catch (err) {
-          this.emit("error", `[Forwarder] Loi gui msg ${msg.id}: ${err.message}`);
-          failed.push(msg.id);
-        }
+    const snapshot = await this._withQueueLock(() => [...this.messageQueue]);
+    const toForward = snapshot.filter((m) => {
+      if (m.createdAt && Date.now() - m.createdAt > MAX_AGE_MS) {
+        this.emit("log", `[Forwarder] Bo qua msg ${m.id} (qua 30 phut)`);
+        return false;
       }
+      return true;
+    });
 
-      // Cap nhat queue
-      if (forwarded.length > 0 || failed.length > 0) {
-        await this._withQueueLock(() => {
-          this.messageQueue = this.messageQueue
-            .filter((m) => !forwarded.includes(m.id))
-            .map((m) => {
-              if (failed.includes(m.id)) {
-                return { ...m, retryCount: (m.retryCount || 0) + 1 };
-              }
-              return m;
-            });
-          this._flushQueueToDisk();
-        });
-      }
-
-      if (forwarded.length > 0) {
-        this.emit("log", `[Forwarder] Da gui ${forwarded.length} tin nhan`);
-      }
-      if (failed.length > 0) {
-        this.emit("log", `[Forwarder] ${failed.length} tin nhan loi, se thu lai lan sau`);
-      }
-    } catch (err) {
-      this.emit("error", `[Forwarder] Loi: ${err.message}`);
+    if (toForward.length === 0) {
+      await this._withQueueLock(() => {
+        this.messageQueue = [];
+        this._flushQueueToDisk();
+      });
+      for (const msg of snapshot) this._deleteMessageFiles(msg);
+      return;
     }
+
+    for (let i = 0; i < this.targetGroups.length; i++) {
+      if (!this.running) break;
+      const target = this.targetGroups[i];
+
+      try {
+        this.emit(
+          "log",
+          `[Forwarder ${i + 1}/${this.targetGroups.length}] Vao "${target}"...`,
+        );
+        await this._navigateToGroup(this.page, target);
+        await new Promise((r) => setTimeout(r, 2000));
+
+        for (const msg of toForward) {
+          if (!this.running) break;
+          try {
+            await this._forwardMessage(this.page, msg);
+          } catch (err) {
+            this.emit(
+              "error",
+              `[${target}] Loi gui msg ${msg.id}: ${err.message}`,
+            );
+          }
+        }
+      } catch (err) {
+        this.emit("error", `[${target}] Loi: ${err.message}`);
+      }
+    }
+
+    // Sau khi gui xong tat ca nhom dich → xoa queue va file
+    await this._withQueueLock(() => {
+      const ids = new Set(snapshot.map((m) => m.id));
+      this.messageQueue = this.messageQueue.filter((m) => !ids.has(m.id));
+      this._flushQueueToDisk();
+    });
+    for (const msg of snapshot) this._deleteMessageFiles(msg);
+
+    this.emit(
+      "log",
+      `[Forwarder] Da gui ${toForward.length} tin nhan toi ${this.targetGroups.length} nhom, da xoa queue`,
+    );
   }
 
   _deleteMessageFiles(msg) {
@@ -672,14 +674,12 @@ class Bot extends EventEmitter {
       await new Promise((r) => setTimeout(r, 2500));
       await this._clickSendOrEnter(page);
       await new Promise((r) => setTimeout(r, 1500));
-      this._deleteFiles([msg.filePath]);
     } else if (msg.type === "images") {
       this.emit("log", `  -> Album ${msg.count} anh`);
       await this._dropFiles(page, msg.filePaths);
       await new Promise((r) => setTimeout(r, 3000));
       await this._clickSendOrEnter(page);
       await new Promise((r) => setTimeout(r, 2000));
-      this._deleteFiles(msg.filePaths);
     } else if (msg.type === "image_with_text") {
       this.emit("log", "  -> Anh + caption");
       await this._dropFiles(page, [msg.filePath]);
@@ -695,7 +695,6 @@ class Bot extends EventEmitter {
       await new Promise((r) => setTimeout(r, 500));
       await page.keyboard.press("Enter");
       await new Promise((r) => setTimeout(r, 2000));
-      this._deleteFiles([msg.filePath]);
     } else if (msg.type === "images_with_text") {
       this.emit("log", `  -> Album ${msg.count} anh + caption`);
       await this._dropFiles(page, msg.filePaths);
@@ -711,7 +710,6 @@ class Bot extends EventEmitter {
       await new Promise((r) => setTimeout(r, 500));
       await page.keyboard.press("Enter");
       await new Promise((r) => setTimeout(r, 2000));
-      this._deleteFiles(msg.filePaths);
     }
   }
 
@@ -804,20 +802,6 @@ class Bot extends EventEmitter {
       } catch { /* ignore */ }
     }
     await page.keyboard.press("Enter");
-  }
-
-  _deleteFiles(filePaths) {
-    for (const fp of filePaths) {
-      const abs = path.resolve(fp);
-      try {
-        if (fs.existsSync(abs)) {
-          fs.unlinkSync(abs);
-          this.emit("log", `  Da xoa: ${path.basename(abs)}`);
-        }
-      } catch (err) {
-        this.emit("error", `Khong xoa duoc: ${path.basename(abs)}`);
-      }
-    }
   }
 
   // ─── DOWNLOAD IMAGE ───────────────────────────────────────────────────────

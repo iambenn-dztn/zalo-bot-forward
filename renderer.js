@@ -1,9 +1,8 @@
 const { ipcRenderer } = require("electron");
 
 // DOM Elements
-const sourceGroupsInput = document.getElementById("sourceGroups");
-const targetGroupInput = document.getElementById("targetGroup");
-const checkIntervalInput = document.getElementById("checkInterval");
+const sourceGroupInput = document.getElementById("sourceGroup");
+const targetGroupsInput = document.getElementById("targetGroups");
 const forwardIntervalInput = document.getElementById("forwardInterval");
 const chromePathInput = document.getElementById("chromePath");
 const startBtn = document.getElementById("startBtn");
@@ -37,35 +36,29 @@ function updateStatus(message, state = "idle") {
 }
 
 function setInputsDisabled(disabled) {
-  sourceGroupsInput.disabled = disabled;
-  targetGroupInput.disabled = disabled;
-  checkIntervalInput.disabled = disabled;
+  sourceGroupInput.disabled = disabled;
+  targetGroupsInput.disabled = disabled;
   forwardIntervalInput.disabled = disabled;
   chromePathInput.disabled = disabled;
 }
 
 // Start bot
 startBtn.addEventListener("click", () => {
-  // Parse nhóm nguồn: mỗi dòng 1 nhóm, bỏ dòng trống
-  const sourceGroups = sourceGroupsInput.value
+  const sourceGroup = sourceGroupInput.value.trim();
+  // Parse nhóm đích: mỗi dòng 1 nhóm, bỏ dòng trống
+  const targetGroups = targetGroupsInput.value
     .split("\n")
     .map((s) => s.trim())
     .filter(Boolean);
-  const targetGroup = targetGroupInput.value.trim();
-  const checkInterval = parseInt(checkIntervalInput.value);
   const forwardInterval = parseInt(forwardIntervalInput.value);
   const chromePath = chromePathInput.value.trim();
 
-  if (sourceGroups.length === 0 || !targetGroup) {
-    alert("Vui lòng nhập ít nhất 1 nhóm nguồn và nhóm đích!");
-    return;
-  }
-  if (checkInterval < 1000) {
-    alert("Thời gian quét phải >= 1000ms!");
+  if (!sourceGroup || targetGroups.length === 0) {
+    alert("Vui lòng nhập nhóm nguồn và ít nhất 1 nhóm đích!");
     return;
   }
   if (forwardInterval < 10000) {
-    alert("Chu kỳ forward phải >= 10000ms (10 giây)!");
+    alert("Cửa sổ lắng nghe phải >= 10000ms (10 giây)!");
     return;
   }
 
@@ -75,12 +68,14 @@ startBtn.addEventListener("click", () => {
   setInputsDisabled(true);
 
   updateStatus("Đang khởi động bot...", "running");
-  addLog(`Đang khởi động bot (${sourceGroups.length} nhóm nguồn)...`, "info");
+  addLog(
+    `Đang khởi động bot (nguồn "${sourceGroup}" -> ${targetGroups.length} nhóm đích)...`,
+    "info",
+  );
 
   ipcRenderer.send("start-bot", {
-    sourceGroups,
-    targetGroup,
-    checkInterval,
+    sourceGroup,
+    targetGroups,
     forwardInterval,
     chromePath: chromePath || undefined,
   });

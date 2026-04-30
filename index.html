@@ -17,23 +17,19 @@
 
         <div class="config-section">
             <div class="form-group">
-                <label for="sourceGroups">Nhóm nguồn (mỗi dòng 1 nhóm):</label>
-                <textarea id="sourceGroups" rows="4" placeholder="Nhóm A&#10;Nhóm B&#10;Nhóm C">Nhóm 1</textarea>
+                <label for="sourceGroup">Nhóm nguồn (1 nhóm):</label>
+                <input type="text" id="sourceGroup" placeholder="Nhập tên nhóm nguồn" value="Nhóm 1">
             </div>
 
             <div class="form-group">
-                <label for="targetGroup">Nhóm đích (gửi tin nhắn):</label>
-                <input type="text" id="targetGroup" placeholder="Nhập tên nhóm đích" value="Nhóm 2">
+                <label for="targetGroups">Nhóm đích (mỗi dòng 1 nhóm):</label>
+                <textarea id="targetGroups" rows="4" placeholder="Nhóm A&#10;Nhóm B&#10;Nhóm C">Nhóm 2
+Nhóm 3</textarea>
             </div>
 
             <div class="form-group">
-                <label for="checkInterval">Thời gian chờ load tin nhắn mỗi nhóm (ms):</label>
-                <input type="number" id="checkInterval" value="3000" min="1000" step="500">
-            </div>
-
-            <div class="form-group">
-                <label for="forwardInterval">Chu kỳ forward (ms) - mặc định 30 giây:</label>
-                <input type="number" id="forwardInterval" value="30000" min="10000" step="5000">
+                <label for="forwardInterval">Cửa sổ lắng nghe (ms) - mặc định 60 giây:</label>
+                <input type="number" id="forwardInterval" value="60000" min="10000" step="5000">
             </div>
 
             <div class="form-group">
