@@ -23,7 +23,7 @@ class Bot extends EventEmitter {
       ? config.targetGroups
       : (config.targetGroup ? [config.targetGroup] : []);
     // Thoi gian cho DOM load + chu ky quet trong cua so lang nghe (ms)
-    this.checkInterval = config.checkInterval || 3000;
+    this.checkInterval = config.checkInterval || 5000;
     // Cua so lang nghe truoc khi forward (ms) - mac dinh 1 phut
     this.forwardInterval = config.forwardInterval || 60000;
     // Duong dan Chrome executable (de trong neu dung mac dinh cua Puppeteer)
@@ -40,6 +40,7 @@ class Bot extends EventEmitter {
     // In-memory queue + async lock
     this.messageQueue = [];
     this._queueLock = Promise.resolve();
+    this._flushTimer = null;
 
     if (!fs.existsSync(IMAGES_PATH)) {
       fs.mkdirSync(IMAGES_PATH, { recursive: true });
@@ -92,8 +93,16 @@ class Bot extends EventEmitter {
         createdAt: message.createdAt || Date.now(),
         retryCount: 0,
       });
-      this._flushQueueToDisk();
     });
+    this._scheduleFlush();
+  }
+
+  _scheduleFlush() {
+    if (this._flushTimer) return;
+    this._flushTimer = setTimeout(() => {
+      this._flushTimer = null;
+      this._withQueueLock(() => this._flushQueueToDisk()).catch(() => { });
+    }, 1000);
   }
 
   // ─── STATE helpers ────────────────────────────────────────────────────────
@@ -138,12 +147,19 @@ class Bot extends EventEmitter {
           "--disable-accelerated-2d-canvas",
           "--disable-gpu",
           "--disable-blink-features=AutomationControlled",
+          "--disable-extensions",
+          "--disable-default-apps",
+          "--disable-background-networking",
+          "--disable-features=Translate,BackForwardCache,IsolateOrigins,site-per-process",
+          "--renderer-process-limit=1",
+          "--js-flags=--max-old-space-size=256",
         ],
-        defaultViewport: hasSession ? { width: 1366, height: 768 } : null,
+        defaultViewport: hasSession ? { width: 1280, height: 720 } : null,
       });
 
       this.page = (await this.browser.pages())[0] || (await this.browser.newPage());
-      await this.page.setViewport({ width: 1366, height: 768 });
+      await this.page.setViewport({ width: 1280, height: 720 });
+      await this._setupRequestInterception(this.page);
       await this._gotoZalo(this.page);
 
       if (!hasSession) {
@@ -165,11 +181,18 @@ class Bot extends EventEmitter {
             "--disable-accelerated-2d-canvas",
             "--disable-gpu",
             "--disable-blink-features=AutomationControlled",
+            "--disable-extensions",
+            "--disable-default-apps",
+            "--disable-background-networking",
+            "--disable-features=Translate,BackForwardCache,IsolateOrigins,site-per-process",
+            "--renderer-process-limit=1",
+            "--js-flags=--max-old-space-size=256",
           ],
-          defaultViewport: { width: 1366, height: 768 },
+          defaultViewport: { width: 1280, height: 720 },
         });
         this.page = (await this.browser.pages())[0] || (await this.browser.newPage());
-        await this.page.setViewport({ width: 1366, height: 768 });
+        await this.page.setViewport({ width: 1280, height: 720 });
+        await this._setupRequestInterception(this.page);
         await this._gotoZalo(this.page);
         await this._waitForZaloReady(this.page);
       } else {
@@ -268,11 +291,16 @@ class Bot extends EventEmitter {
     }
     const seenIds = this.seenFrameIds[groupName];
 
+    // Sau lan seed dau, chi quet N frame cuoi (tin moi luon o duoi).
+    // Lan seed dau: quet tat ca de mark seen, tranh re-forward khi restart.
+    const scanLimit = this.groupInitialized[groupName] ? 30 : null;
+
     // Lay tat ca tin nhan khong phai cua minh tu DOM
-    const allMessages = await this.page.evaluate(() => {
-      const frames = document.querySelectorAll(
+    const allMessages = await this.page.evaluate((limit) => {
+      const nodeList = document.querySelectorAll(
         '[id^="message-frame_"], .message-frame, .message-non-frame',
       );
+      const frames = limit ? Array.from(nodeList).slice(-limit) : Array.from(nodeList);
 
       const results = [];
 
@@ -350,7 +378,7 @@ class Bot extends EventEmitter {
       }
 
       return results;
-    });
+    }, scanLimit);
 
     // Lan quet dau tien cho nhom nay: danh dau tat ca la da thay
     if (!this.groupInitialized[groupName]) {
@@ -581,6 +609,18 @@ class Bot extends EventEmitter {
 
   // ─── NAVIGATION ───────────────────────────────────────────────────────────
 
+  async _setupRequestInterception(page) {
+    await page.setRequestInterception(true);
+    page.on("request", (req) => {
+      const type = req.resourceType();
+      if (type === "font" || type === "media") {
+        req.abort();
+      } else {
+        req.continue();
+      }
+    });
+  }
+
   async _gotoZalo(page) {
     let retries = 0;
     while (retries < 3) {
@@ -810,30 +850,34 @@ class Bot extends EventEmitter {
     try {
       this.emit("log", `  Download: ${fileName}`);
 
-      const base64Data = await page.evaluate(async (url) => {
+      // arrayBuffer -> base64 truc tiep, bo qua Blob + FileReader + dataURL prefix
+      const base64Image = await page.evaluate(async (url) => {
         try {
           const response = await fetch(url);
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
-          const blob = await response.blob();
-          return await new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onloadend = () => resolve(reader.result);
-            reader.onerror = () => reject(new Error("FileReader error"));
-            reader.readAsDataURL(blob);
-          });
+          const buf = await response.arrayBuffer();
+          const bytes = new Uint8Array(buf);
+          let binary = "";
+          const chunk = 0x8000;
+          for (let i = 0; i < bytes.length; i += chunk) {
+            binary += String.fromCharCode.apply(
+              null,
+              bytes.subarray(i, i + chunk),
+            );
+          }
+          return btoa(binary);
         } catch (err) {
           return `ERROR: ${err.message}`;
         }
       }, blobUrl);
 
-      if (typeof base64Data === "string" && base64Data.startsWith("ERROR:")) {
-        throw new Error(base64Data);
+      if (typeof base64Image === "string" && base64Image.startsWith("ERROR:")) {
+        throw new Error(base64Image);
       }
-      if (!base64Data || !base64Data.includes("base64,")) {
-        throw new Error("Invalid base64 data");
+      if (!base64Image) {
+        throw new Error("Empty image data");
       }
 
-      const base64Image = base64Data.split(";base64,").pop();
       const filePath = path.resolve(IMAGES_PATH, fileName);
       fs.writeFileSync(filePath, base64Image, { encoding: "base64" });
 
@@ -851,6 +895,11 @@ class Bot extends EventEmitter {
   async stop() {
     this.running = false;
     this.page = null;
+
+    if (this._flushTimer) {
+      clearTimeout(this._flushTimer);
+      this._flushTimer = null;
+    }
 
     if (this.browser) {
       try {
