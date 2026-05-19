@@ -17,12 +17,15 @@ class Bot extends EventEmitter {
   constructor(config) {
     super();
     // 1 nhom nguon
-    this.sourceGroup = config.sourceGroup
-      || (Array.isArray(config.sourceGroups) ? config.sourceGroups[0] : "");
+    this.sourceGroup =
+      config.sourceGroup ||
+      (Array.isArray(config.sourceGroups) ? config.sourceGroups[0] : "");
     // N nhom dich
     this.targetGroups = Array.isArray(config.targetGroups)
       ? config.targetGroups
-      : (config.targetGroup ? [config.targetGroup] : []);
+      : config.targetGroup
+        ? [config.targetGroup]
+        : [];
     // Thoi gian cho DOM load + chu ky quet trong cua so lang nghe (ms)
     this.checkInterval = config.checkInterval || 5000;
     // Cua so lang nghe truoc khi forward (ms) - mac dinh 1 phut
@@ -61,7 +64,9 @@ class Bot extends EventEmitter {
         const raw = fs.readFileSync(MESSAGES_FILE, "utf8");
         return JSON.parse(raw);
       }
-    } catch { /* ignore corrupt file */ }
+    } catch {
+      /* ignore corrupt file */
+    }
     return [];
   }
 
@@ -80,7 +85,9 @@ class Bot extends EventEmitter {
   async _withQueueLock(fn) {
     const prev = this._queueLock;
     let resolve;
-    this._queueLock = new Promise((r) => { resolve = r; });
+    this._queueLock = new Promise((r) => {
+      resolve = r;
+    });
     await prev;
     try {
       return await fn();
@@ -104,7 +111,7 @@ class Bot extends EventEmitter {
     if (this._flushTimer) return;
     this._flushTimer = setTimeout(() => {
       this._flushTimer = null;
-      this._withQueueLock(() => this._flushQueueToDisk()).catch(() => { });
+      this._withQueueLock(() => this._flushQueueToDisk()).catch(() => {});
     }, 1000);
   }
 
@@ -115,7 +122,9 @@ class Bot extends EventEmitter {
       if (fs.existsSync(STATE_FILE)) {
         return JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
       }
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
     return {};
   }
 
@@ -131,15 +140,13 @@ class Bot extends EventEmitter {
 
       this.emit(
         "status",
-        hasSession
-          ? "Dang khoi dong..."
-          : "Dang khoi dong... (Can quet QR)",
+        hasSession ? "Dang khoi dong..." : "Dang khoi dong... (Can quet QR)",
       );
 
       // Lan dau (chua co session): hien UI de scan QR (desktop) hoac headless + screenshot (server)
       // Co session roi: luon headless
       this.browser = await puppeteer.launch({
-        headless: (hasSession || this.serverMode) ? "new" : false,
+        headless: hasSession || this.serverMode ? "new" : false,
         userDataDir: SESSION_PATH,
         ...(this.chromePath ? { executablePath: this.chromePath } : {}),
         args: [
@@ -160,7 +167,8 @@ class Bot extends EventEmitter {
         defaultViewport: hasSession ? { width: 1280, height: 720 } : null,
       });
 
-      this.page = (await this.browser.pages())[0] || (await this.browser.newPage());
+      this.page =
+        (await this.browser.pages())[0] || (await this.browser.newPage());
       await this.page.setViewport({ width: 1280, height: 720 });
       await this._setupRequestInterception(this.page);
       await this._gotoZalo(this.page);
@@ -175,17 +183,24 @@ class Bot extends EventEmitter {
             try {
               const buf = await this.page.screenshot({ type: "png" });
               this.emit("qr-screenshot", buf);
-            } catch { /* ignore */ }
+            } catch {
+              /* ignore */
+            }
           }, 2000);
         }
 
         try {
-          await this.page.waitForSelector("#contact-search-input", { timeout: 0 });
+          await this.page.waitForSelector("#contact-search-input", {
+            timeout: 0,
+          });
         } finally {
           if (qrInterval) clearInterval(qrInterval);
         }
 
-        this.emit("log", "Dang nhap thanh cong, dang khoi dong lai headless...");
+        this.emit(
+          "log",
+          "Dang nhap thanh cong, dang khoi dong lai headless...",
+        );
         await this.browser.close();
         await new Promise((r) => setTimeout(r, 2000));
 
@@ -210,7 +225,8 @@ class Bot extends EventEmitter {
           ],
           defaultViewport: { width: 1280, height: 720 },
         });
-        this.page = (await this.browser.pages())[0] || (await this.browser.newPage());
+        this.page =
+          (await this.browser.pages())[0] || (await this.browser.newPage());
         await this.page.setViewport({ width: 1280, height: 720 });
         await this._setupRequestInterception(this.page);
         await this._gotoZalo(this.page);
@@ -269,13 +285,19 @@ class Bot extends EventEmitter {
         await this._navigateToGroup(this.page, this.sourceGroup);
         await new Promise((r) => setTimeout(r, this.checkInterval));
       } catch (err) {
-        this.emit("error", `[${this.sourceGroup}] Loi vao nhom: ${err.message}`);
+        this.emit(
+          "error",
+          `[${this.sourceGroup}] Loi vao nhom: ${err.message}`,
+        );
         await new Promise((r) => setTimeout(r, 5000));
         continue;
       }
 
       const listenStart = Date.now();
-      this.emit("log", `[Listener] Lang nghe ${this.forwardInterval / 1000}s...`);
+      this.emit(
+        "log",
+        `[Listener] Lang nghe ${this.forwardInterval / 1000}s...`,
+      );
       while (this.running && Date.now() - listenStart < this.forwardInterval) {
         try {
           await this._scanGroup(this.sourceGroup);
@@ -284,7 +306,9 @@ class Bot extends EventEmitter {
         }
         const remaining = this.forwardInterval - (Date.now() - listenStart);
         if (remaining <= 0) break;
-        await new Promise((r) => setTimeout(r, Math.min(this.checkInterval, remaining)));
+        await new Promise((r) =>
+          setTimeout(r, Math.min(this.checkInterval, remaining)),
+        );
       }
 
       if (!this.running) break;
@@ -320,7 +344,9 @@ class Bot extends EventEmitter {
       const nodeList = document.querySelectorAll(
         '[id^="message-frame_"], .message-frame, .message-non-frame',
       );
-      const frames = limit ? Array.from(nodeList).slice(-limit) : Array.from(nodeList);
+      const frames = limit
+        ? Array.from(nodeList).slice(-limit)
+        : Array.from(nodeList);
 
       const results = [];
 
@@ -365,8 +391,11 @@ class Bot extends EventEmitter {
           }
         }
         if (!text.trim()) {
-          const msgContainer = frames[i].querySelector(".text-message__container");
-          if (msgContainer) text = msgContainer.innerText || msgContainer.textContent || "";
+          const msgContainer = frames[i].querySelector(
+            ".text-message__container",
+          );
+          if (msgContainer)
+            text = msgContainer.innerText || msgContainer.textContent || "";
         }
         if (!text.trim()) {
           const textSpan = frames[i].querySelector("span.text");
@@ -509,7 +538,10 @@ class Bot extends EventEmitter {
             });
           }
         } else {
-          this.emit("log", `[${groupName}] Album ${msg.images.length} anh + caption`);
+          this.emit(
+            "log",
+            `[${groupName}] Album ${msg.images.length} anh + caption`,
+          );
           const filePaths = [];
           for (let idx = 0; idx < msg.images.length; idx++) {
             const fileName = `image_${timestamp}_${idx + 1}.jpg`;
@@ -623,7 +655,9 @@ class Bot extends EventEmitter {
       try {
         const abs = path.resolve(fp);
         if (fs.existsSync(abs)) fs.unlinkSync(abs);
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
     }
   }
 
@@ -818,7 +852,10 @@ class Bot extends EventEmitter {
     let usedSelector = null;
     for (const selector of dropSelectors) {
       const el = await page.$(selector);
-      if (el) { usedSelector = selector; break; }
+      if (el) {
+        usedSelector = selector;
+        break;
+      }
     }
 
     if (!usedSelector) throw new Error("Khong tim thay vung drop");
@@ -834,7 +871,9 @@ class Bot extends EventEmitter {
           const arr = new Uint8Array(bytes.length);
           for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
           const blob = new Blob([arr], { type: fileData.mimeType });
-          dataTransfer.items.add(new File([blob], fileData.name, { type: fileData.mimeType }));
+          dataTransfer.items.add(
+            new File([blob], fileData.name, { type: fileData.mimeType }),
+          );
         }
 
         const opts = { bubbles: true, cancelable: true, dataTransfer };
@@ -858,8 +897,13 @@ class Bot extends EventEmitter {
     for (const selector of sendSelectors) {
       try {
         const btn = await page.$(selector);
-        if (btn) { await btn.click(); return; }
-      } catch { /* ignore */ }
+        if (btn) {
+          await btn.click();
+          return;
+        }
+      } catch {
+        /* ignore */
+      }
     }
     await page.keyboard.press("Enter");
   }
@@ -924,7 +968,9 @@ class Bot extends EventEmitter {
     if (this.browser) {
       try {
         await this.browser.close();
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
       this.browser = null;
     }
 

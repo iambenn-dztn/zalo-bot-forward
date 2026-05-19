@@ -1,7 +1,9 @@
 const { app, BrowserWindow, ipcMain } = require("electron");
 const path = require("path");
 const fs = require("fs");
-const Bot = require("./bot");
+const Bot = require("../../bot");
+// Thư mục gốc của repo (apps/desktop/ → ../../)
+const ROOT_DIR = path.join(__dirname, "..", "..");
 let mainWindow;
 let bot = null;
 
@@ -17,7 +19,7 @@ function createWindow() {
     icon: path.join(__dirname, "build", "icon.png"),
   });
 
-  mainWindow.loadFile("index.html");
+  mainWindow.loadFile(path.join(__dirname, "index.html"));
 
   // Mở DevTools khi đang develop (có thể comment dòng này)
   // mainWindow.webContents.openDevTools();
@@ -79,10 +81,10 @@ ipcMain.on("stop-bot", (event) => {
 ipcMain.on("clear-session", (event) => {
   try {
     const toDelete = [
-      path.join(__dirname, "zalo_session"),
-      path.join(__dirname, "bot_state.json"),
-      path.join(__dirname, "messages.json"),
-      path.join(__dirname, "images"),
+      path.join(ROOT_DIR, "zalo_session"),
+      path.join(ROOT_DIR, "bot_state.json"),
+      path.join(ROOT_DIR, "messages.json"),
+      path.join(ROOT_DIR, "images"),
     ];
     for (const p of toDelete) {
       if (!fs.existsSync(p)) continue;

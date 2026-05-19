@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: zalo-bot-forward
+    runtime: node
+    buildCommand: npm install
+    startCommand: node server.js
+    plan: free
+    envVars:
+      - key: SOURCE_GROUP
+        sync: false # điền trong Render dashboard
+      - key: TARGET_GROUPS
+        sync: false # nhiều nhóm: phân cách bằng \n
+      - key: FORWARD_INTERVAL
+        value: 60000
+      - key: API_TRANSFORM_TEXT_API_KEY
+        sync: false
+    healthCheckPath: /health

@@ -1,0 +1,9 @@
+node_modules
+zalo_session
+images
+dist
+*.log
+config.json
+messages.json
+bot_state.json
+apps/desktop

@@ -1,0 +1,6 @@
+{
+  "sourceGroup": "Tên nhóm Zalo nguồn (copy chính xác từ Zalo)",
+  "targetGroups": ["Tên nhóm đích 1", "Tên nhóm đích 2"],
+  "forwardInterval": 60000,
+  "chromePath": ""
+}
